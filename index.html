@@ -10,34 +10,191 @@
 
   <body>
     <main class="container">
-      <h1>Welcome to Tauri</h1>
+      <header class="app-shell__header">
+        <div class="app-shell__brand-block">
+          <div class="launcher-brand">
+            <div>
+              <p class="app-shell__eyebrow">Rust-native SQL workspace</p>
+              <h1 id="launcher-title">Rusty Pythia</h1>
+            </div>
+          </div>
+          <p class="launcher-copy">
+            Rusty Pythia keeps its own internal SQLite workspace. External SQL
+            apps and saved connections are optional helpers, not a requirement.
+          </p>
+        </div>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/src/assets/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
-        <a href="https://www.typescriptlang.org/docs" target="_blank">
-          <img
-            src="/src/assets/typescript.svg"
-            class="logo typescript"
-            alt="typescript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+        <div class="app-shell__status-card" aria-label="Launch mode summary">
+          <p class="app-shell__status-label">Active external connection</p>
+          <p class="app-shell__status-value" id="active-preset-name">
+            No external connection
+          </p>
+          <p class="app-shell__status-copy">
+            <span id="active-preset-summary"
+              >Rusty Pythia still has its internal workspace database even when
+              no external connection is selected.</span
+            >
+          </p>
+        </div>
+      </header>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
+      <section class="workspace-shell" aria-labelledby="workspace-title">
+        <div class="workspace-shell__main">
+          <section class="launcher-card" aria-labelledby="workspace-title">
+            <div class="workspace-shell__heading">
+              <h2 id="workspace-title">Launch Target</h2>
+              <p>
+                Paste a SQL app URL directly, or let an optional saved
+                connection fill it for you.
+              </p>
+            </div>
+
+            <form class="launcher-form" id="launcher-form">
+              <label for="launcher-url">SQL app URL to open</label>
+              <input
+                id="launcher-url"
+                type="url"
+                inputmode="url"
+                placeholder="https://sql-app.example"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <div class="launcher-actions">
+                <div class="launcher-menu">
+                  <button
+                    type="button"
+                    id="launch-menu-button"
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="launch-menu"
+                  >
+                    Launch SQL App
+                  </button>
+                  <div class="launch-menu" id="launch-menu" role="menu" hidden>
+                    <button type="submit" role="menuitem" id="open-tauri-button">
+                      Open in Tauri Window
+                    </button>
+                    <button type="button" role="menuitem" id="open-browser-button">
+                      Open in Browser
+                    </button>
+                  </div>
+                </div>
+                <span class="launcher-actions__hint"
+                  >This URL stands on its own; a saved connection can optionally
+                  fill it in.</span
+                >
+              </div>
+            </form>
+            <p class="section-note">
+              Rusty Pythia's own workspace database is separate from any launch
+              target or external connection you save below.
+            </p>
+            <p id="launcher-msg" aria-live="polite"></p>
+          </section>
+        </div>
+
+        <aside class="workspace-shell__side" aria-label="Workspace notes">
+          <section class="info-card">
+            <h2>Optional External Connections</h2>
+            <p class="section-note">
+              Save reusable launch and test defaults here. These do not create
+              Rusty Pythia's internal database.
+            </p>
+            <form class="preset-form" id="preset-form">
+              <input id="preset-id" type="hidden" />
+
+              <label for="preset-name">Connection name</label>
+              <input id="preset-name" type="text" placeholder="Local MSSQL" />
+
+              <label for="preset-engine">Engine</label>
+              <select id="preset-engine">
+                <option value="mssql">MSSQL</option>
+                <option value="postgres">Postgres</option>
+                <option value="sqlite">SQLite</option>
+              </select>
+
+              <label for="preset-launch-url">Preferred SQL app URL</label>
+              <input
+                id="preset-launch-url"
+                type="url"
+                inputmode="url"
+                placeholder="Optional: https://sql-app.example"
+              />
+
+              <label for="preset-host">Server host or SQLite file</label>
+              <input id="preset-host" type="text" placeholder="localhost or /path/db.sqlite" />
+
+              <div class="preset-form__row">
+                <div>
+                  <label for="preset-port">Port</label>
+                  <input id="preset-port" type="number" inputmode="numeric" placeholder="1433" />
+                </div>
+                <div>
+                  <label for="preset-database">Default database</label>
+                  <input id="preset-database" type="text" placeholder="Optional: master" />
+                </div>
+              </div>
+
+              <label for="preset-username">Username</label>
+              <input id="preset-username" type="text" placeholder="sa or user name" />
+
+              <div class="preset-form__row">
+                <div>
+                  <label for="preset-auth-mode">Auth mode</label>
+                  <select id="preset-auth-mode">
+                    <option value="sql">SQL auth</option>
+                    <option value="ntlm">NTLM</option>
+                    <option value="none">No auth</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="preset-domain">Domain</label>
+                  <input id="preset-domain" type="text" placeholder="DOMAIN" />
+                </div>
+              </div>
+
+              <label for="preset-password">Password</label>
+              <input id="preset-password" type="password" placeholder="Stored locally by Rusty Pythia" />
+
+              <div class="preset-form__actions">
+                <button type="submit" id="save-preset-button">Save Connection</button>
+                <button type="button" id="test-preset-button">Test Connection</button>
+                <button type="button" id="reset-preset-button">New Connection</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="info-card">
+            <div class="preset-list__header">
+              <h2>Saved presets</h2>
+              <p id="preset-list-status">Local to this app profile.</p>
+            </div>
+            <div id="preset-list" class="preset-list" aria-live="polite"></div>
+          </section>
+        </aside>
+      </section>
+
+      <footer class="app-shell__footer">
+        <button type="button" class="footer-link" id="footer-browser-link">
+          Prefer a browser session? Open the web version.
+        </button>
+
+        <div class="resource-links" aria-label="Rusty Pythia resources">
+          <a href="https://tauri.app" target="_blank" rel="noopener noreferrer">
+            Tauri
+          </a>
+          <a
+            href="https://www.typescriptlang.org/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            TypeScript
+          </a>
+          <a href="https://vite.dev" target="_blank" rel="noopener noreferrer">
+            Vite
+          </a>
+        </div>
+      </footer>
     </main>
   </body>
 </html>

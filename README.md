@@ -4,26 +4,15 @@ Rusty Pythia is the next-generation desktop rebuild of Pythia, targeting a Tauri
 
 ## Repository Layout
 
-- `../PythiaJS/` contains the prior PythiaJS codebase archived intact.
-- Root workspace is reserved for the new Rusty Pythia implementation.
-
-## Notes
-
-- Do not modify files under `../PythiaJS/` during the rebuild unless explicitly requested.
+- Root workspace is reserved for the Rusty Pythia implementation.
 
 ## Current Runtime Wiring
 
-- Tauri launches first as the desktop shell.
-- Rust startup spawns `bun ../PythiaJS/src/server.js`.
-- Health check contract uses `/api/health` with `PYTHIA_SERVER_TOKEN`.
-- Tauri opens `http://127.0.0.1:<port>?host=webview`.
-- If desktop window creation fails, Rusty Pythia opens the local URL in your default browser.
+- Tauri loads Rusty Pythia's bundled frontend from this repository.
+- The desktop window is created inside the app shell and points at the bundled `index.html`.
+- Rusty Pythia does not spawn or depend on `../PythiaJS/` at runtime.
 
 ## Run
 
 1. Install dependencies: `npm install`
 2. Start desktop app: `npm run tauri dev`
-
-Optional environment override:
-
-- `RUSTY_PYTHIA_LEGACY_ROOT` to point at a non-default legacy folder.

@@ -11,7 +11,18 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Rusty Pythia",
+        "url": "index.html",
+        "create": false,
+        "width": 1360,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700
+      }
+    ],
     "security": {
       "csp": null
     }
