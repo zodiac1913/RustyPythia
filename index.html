@@ -25,9 +25,9 @@
         </div>
 
         <div class="app-shell__status-card" aria-label="Launch mode summary">
-          <p class="app-shell__status-label">Active external connection</p>
+          <p class="app-shell__status-label">Default Database Target</p>
           <p class="app-shell__status-value" id="active-preset-name">
-            No external connection
+            Internal workspace database
           </p>
           <p class="app-shell__status-copy">
             <span id="active-preset-summary"
@@ -42,14 +42,80 @@
         <div class="workspace-shell__main">
           <section class="launcher-card" aria-labelledby="workspace-title">
             <div class="workspace-shell__heading">
-              <h2 id="workspace-title">Launch Target</h2>
+              <h2 id="workspace-title">SQL Workspace</h2>
               <p>
-                Paste a SQL app URL directly, or let an optional saved
-                connection fill it for you.
+                Rusty Pythia opens to a SQL interface first. The built-in
+                internal workspace database is the default until you switch to
+                another target.
               </p>
             </div>
 
+            <form class="sql-editor-form" id="sql-editor-form">
+              <label for="sql-editor">SQL query</label>
+              <textarea
+                id="sql-editor"
+                rows="10"
+                placeholder="SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
+                spellcheck="false"
+              ></textarea>
+              <div class="sql-editor-form__actions">
+                <button type="submit" id="run-sql-button">Run SQL</button>
+                <button type="button" id="clear-sql-button">Clear</button>
+                <span class="launcher-actions__hint">Queries run directly against the current database target when supported.</span>
+              </div>
+            </form>
+
+            <div class="sql-results-card" aria-live="polite">
+              <div class="preset-list__header sql-results-card__header">
+                <h3 id="sql-results-title">Query Results</h3>
+                <p id="sql-results-status">Ready.</p>
+              </div>
+              <div id="sql-results-output" class="sql-results-output">
+                <p class="sql-results-output__empty">Run a query to see rows or statement results here.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="info-card" aria-labelledby="sql-memory-title">
+            <div class="workspace-shell__heading workspace-shell__heading--compact">
+              <h2 id="sql-memory-title">Scoped SQL Memory</h2>
+              <p>
+                Statements saved here belong only to the current database
+                target. Rusty Pythia does not recall DB A statements while you
+                are working in DB B.
+              </p>
+            </div>
+
+            <form class="sql-memory-form" id="sql-memory-form">
+              <label for="sql-memory-statement">Record SQL statement</label>
+              <textarea
+                id="sql-memory-statement"
+                rows="5"
+                placeholder="SELECT * FROM study_subjects WHERE subject_id = ?"
+                spellcheck="false"
+              ></textarea>
+              <div class="sql-memory-form__actions">
+                <button type="submit" id="save-sql-memory-button">
+                  Save to SQL Memory
+                </button>
+              </div>
+            </form>
+
+            <div class="preset-list__header sql-memory-list__header">
+              <h3 id="sql-memory-scope">Memory for internal workspace database</h3>
+              <p id="sql-memory-status">Loading scoped SQL memory...</p>
+            </div>
+            <div id="sql-memory-list" class="sql-memory-list" aria-live="polite"></div>
+          </section>
+
+          <section class="info-card" aria-labelledby="launch-tools-title">
             <form class="launcher-form" id="launcher-form">
+              <div class="workspace-shell__heading workspace-shell__heading--compact">
+                <h2 id="launch-tools-title">External SQL App Launch</h2>
+                <p>
+                  Open a separate SQL app only when you want that surface.
+                </p>
+              </div>
               <label for="launcher-url">SQL app URL to open</label>
               <input
                 id="launcher-url"
@@ -86,8 +152,8 @@
               </div>
             </form>
             <p class="section-note">
-              Rusty Pythia's own workspace database is separate from any launch
-              target or external connection you save below.
+              This launcher is secondary. The main landing surface is the SQL
+              workspace above.
             </p>
             <p id="launcher-msg" aria-live="polite"></p>
           </section>
@@ -95,80 +161,15 @@
 
         <aside class="workspace-shell__side" aria-label="Workspace notes">
           <section class="info-card">
-            <h2>Optional External Connections</h2>
-            <p class="section-note">
-              Save reusable launch and test defaults here. These do not create
-              Rusty Pythia's internal database.
-            </p>
-            <form class="preset-form" id="preset-form">
-              <input id="preset-id" type="hidden" />
-
-              <label for="preset-name">Connection name</label>
-              <input id="preset-name" type="text" placeholder="Local MSSQL" />
-
-              <label for="preset-engine">Engine</label>
-              <select id="preset-engine">
-                <option value="mssql">MSSQL</option>
-                <option value="postgres">Postgres</option>
-                <option value="sqlite">SQLite</option>
-              </select>
-
-              <label for="preset-launch-url">Preferred SQL app URL</label>
-              <input
-                id="preset-launch-url"
-                type="url"
-                inputmode="url"
-                placeholder="Optional: https://sql-app.example"
-              />
-
-              <label for="preset-host">Server host or SQLite file</label>
-              <input id="preset-host" type="text" placeholder="localhost or /path/db.sqlite" />
-
-              <div class="preset-form__row">
-                <div>
-                  <label for="preset-port">Port</label>
-                  <input id="preset-port" type="number" inputmode="numeric" placeholder="1433" />
-                </div>
-                <div>
-                  <label for="preset-database">Default database</label>
-                  <input id="preset-database" type="text" placeholder="Optional: master" />
-                </div>
-              </div>
-
-              <label for="preset-username">Username</label>
-              <input id="preset-username" type="text" placeholder="sa or user name" />
-
-              <div class="preset-form__row">
-                <div>
-                  <label for="preset-auth-mode">Auth mode</label>
-                  <select id="preset-auth-mode">
-                    <option value="sql">SQL auth</option>
-                    <option value="ntlm">NTLM</option>
-                    <option value="none">No auth</option>
-                  </select>
-                </div>
-                <div>
-                  <label for="preset-domain">Domain</label>
-                  <input id="preset-domain" type="text" placeholder="DOMAIN" />
-                </div>
-              </div>
-
-              <label for="preset-password">Password</label>
-              <input id="preset-password" type="password" placeholder="Stored locally by Rusty Pythia" />
-
-              <div class="preset-form__actions">
-                <button type="submit" id="save-preset-button">Save Connection</button>
-                <button type="button" id="test-preset-button">Test Connection</button>
-                <button type="button" id="reset-preset-button">New Connection</button>
-              </div>
-            </form>
-          </section>
-
-          <section class="info-card">
             <div class="preset-list__header">
-              <h2>Saved presets</h2>
-              <p id="preset-list-status">Local to this app profile.</p>
+              <h2>Database Targets</h2>
+              <button type="button" class="preset-action" id="open-connection-modal-button">Add External Connection</button>
             </div>
+            <p class="section-note">
+              The internal workspace database is built in. Add external targets
+              through the modal only when you need them.
+            </p>
+            <p id="preset-list-status">Local to this app profile.</p>
             <div id="preset-list" class="preset-list" aria-live="polite"></div>
           </section>
         </aside>
@@ -196,5 +197,75 @@
         </div>
       </footer>
     </main>
+
+    <dialog id="connection-modal" class="connection-modal" aria-labelledby="connection-modal-title">
+      <form class="preset-form connection-modal__form" id="preset-form" method="dialog">
+        <div class="preset-list__header">
+          <h2 id="connection-modal-title">Add External Connection</h2>
+          <button type="button" class="footer-link" id="close-connection-modal-button">Close</button>
+        </div>
+
+        <input id="preset-id" type="hidden" />
+
+        <label for="preset-name">Connection name</label>
+        <input id="preset-name" type="text" placeholder="Local MSSQL" />
+
+        <label for="preset-engine">Engine</label>
+        <select id="preset-engine">
+          <option value="mssql">MSSQL</option>
+          <option value="postgres">Postgres</option>
+          <option value="sqlite">SQLite</option>
+        </select>
+
+        <label for="preset-launch-url">Preferred SQL app URL</label>
+        <input
+          id="preset-launch-url"
+          type="url"
+          inputmode="url"
+          placeholder="Optional: https://sql-app.example"
+        />
+
+        <label for="preset-host">Server host or SQLite file</label>
+        <input id="preset-host" type="text" placeholder="localhost or /path/db.sqlite" />
+
+        <div class="preset-form__row">
+          <div>
+            <label for="preset-port">Port</label>
+            <input id="preset-port" type="number" inputmode="numeric" placeholder="1433" />
+          </div>
+          <div>
+            <label for="preset-database">Default database</label>
+            <input id="preset-database" type="text" placeholder="Optional: master" />
+          </div>
+        </div>
+
+        <label for="preset-username">Username</label>
+        <input id="preset-username" type="text" placeholder="sa or user name" />
+
+        <div class="preset-form__row">
+          <div>
+            <label for="preset-auth-mode">Auth mode</label>
+            <select id="preset-auth-mode">
+              <option value="sql">SQL auth</option>
+              <option value="ntlm">NTLM</option>
+              <option value="none">No auth</option>
+            </select>
+          </div>
+          <div>
+            <label for="preset-domain">Domain</label>
+            <input id="preset-domain" type="text" placeholder="DOMAIN" />
+          </div>
+        </div>
+
+        <label for="preset-password">Password</label>
+        <input id="preset-password" type="password" placeholder="Stored locally by Rusty Pythia" />
+
+        <div class="preset-form__actions">
+          <button type="submit" id="save-preset-button">Save Connection</button>
+          <button type="button" id="test-preset-button">Test Connection</button>
+          <button type="button" id="reset-preset-button">New Connection</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>
