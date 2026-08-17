@@ -1,3 +1,4 @@
+import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -8,23 +9,28 @@ let openBrowserButtonEl: HTMLButtonElement | null;
 let launchMenuButtonEl: HTMLButtonElement | null;
 let launchMenuEl: HTMLElement | null;
 let footerBrowserLinkEl: HTMLButtonElement | null;
-let activePresetNameEl: HTMLElement | null;
-let activePresetSummaryEl: HTMLElement | null;
+let databaseSelectorEl: HTMLSelectElement | null;
+let toggleFavoriteDatabaseEl: HTMLButtonElement | null;
+let addDatabaseButtonEl: HTMLButtonElement | null;
 let workspaceDbPathEl: HTMLElement | null;
 let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
+let savedQueryDropdownEl: HTMLSelectElement | null;
+let querySearchButtonEl: HTMLButtonElement | null;
 let runSqlButtonEl: HTMLButtonElement | null;
 let clearSqlButtonEl: HTMLButtonElement | null;
 let sqlResultsStatusEl: HTMLElement | null;
 let sqlResultsOutputEl: HTMLElement | null;
-let sqlMemoryFormEl: HTMLFormElement | null;
-let sqlMemoryStatementEl: HTMLTextAreaElement | null;
-let saveSqlMemoryButtonEl: HTMLButtonElement | null;
-let sqlMemoryScopeEl: HTMLElement | null;
-let sqlMemoryStatusEl: HTMLElement | null;
-let sqlMemoryListEl: HTMLElement | null;
+let querySearchModalEl: HTMLDialogElement | null;
+let querySearchInputEl: HTMLInputElement | null;
+let queryDateFromEl: HTMLInputElement | null;
+let queryDateToEl: HTMLInputElement | null;
+let querySearchResultsEl: HTMLElement | null;
+let loadQueryFromSearchButtonEl: HTMLButtonElement | null;
+let clearQuerySearchButtonEl: HTMLButtonElement | null;
+let closeQuerySearchModalButtonEl: HTMLButtonElement | null;
 let presetFormEl: HTMLFormElement | null;
 let presetIdEl: HTMLInputElement | null;
 let presetNameEl: HTMLInputElement | null;
@@ -39,10 +45,7 @@ let presetAuthModeEl: HTMLSelectElement | null;
 let presetDomainEl: HTMLInputElement | null;
 let testPresetButtonEl: HTMLButtonElement | null;
 let resetPresetButtonEl: HTMLButtonElement | null;
-let presetListEl: HTMLElement | null;
-let presetListStatusEl: HTMLElement | null;
 let connectionModalEl: HTMLDialogElement | null;
-let openConnectionModalButtonEl: HTMLButtonElement | null;
 let closeConnectionModalButtonEl: HTMLButtonElement | null;
 
 type PresetEngine = "mssql" | "postgres" | "sqlite";
@@ -102,10 +105,6 @@ let workspaceDatabaseInfo: WorkspaceDatabaseInfo | null = null;
 
 function getActiveConnectionId() {
   return activePresetId;
-}
-
-function getActiveConnectionLabel() {
-  return getPresetById(activePresetId)?.name ?? "internal workspace database";
 }
 
 function escapeHtml(value: string) {
@@ -243,22 +242,19 @@ function getPresetById(id: string | null) {
   return connectionPresets.find((preset) => preset.id === id) ?? null;
 }
 
-function updateActivePresetSummary() {
-  const preset = getPresetById(activePresetId);
-
-  if (!activePresetNameEl || !activePresetSummaryEl) {
+function updateDatabaseSelector() {
+  if (!databaseSelectorEl) {
     return;
   }
 
-  if (!preset) {
-    activePresetNameEl.textContent = "Internal workspace database";
-    activePresetSummaryEl.textContent = workspaceDatabaseInfo?.summary
-      ?? "Rusty Pythia uses its internal SQLite workspace database when no external connection is selected.";
-    return;
-  }
+  // Set the selector value to the active preset ID or "internal"
+  databaseSelectorEl.value = activePresetId || "internal";
 
-  activePresetNameEl.textContent = preset.name;
-  activePresetSummaryEl.textContent = `${preset.engine.toUpperCase()} · ${preset.database || "No default database"} · ${preset.host || "No host"}`;
+  // Update favorite button state
+  if (toggleFavoriteDatabaseEl) {
+    const isDefaultInternal = activePresetId === null;
+    toggleFavoriteDatabaseEl.classList.toggle("is-favorite", isDefaultInternal);
+  }
 }
 
 function renderWorkspaceDatabaseInfo() {
@@ -269,34 +265,7 @@ function renderWorkspaceDatabaseInfo() {
   workspaceDbPathEl.textContent = workspaceDatabaseInfo?.path ?? "Workspace database unavailable.";
   workspaceDbSummaryEl.textContent = workspaceDatabaseInfo?.summary
     ?? "Rusty Pythia could not load the internal workspace database details.";
-  updateActivePresetSummary();
-}
-
-function renderSqlMemory(entries: SqlMemoryEntry[]) {
-  if (!sqlMemoryScopeEl || !sqlMemoryStatusEl || !sqlMemoryListEl) {
-    return;
-  }
-
-  const connectionLabel = getActiveConnectionLabel();
-  sqlMemoryScopeEl.textContent = `Memory for ${connectionLabel}`;
-
-  if (!entries.length) {
-    sqlMemoryStatusEl.textContent = `No SQL memory stored yet for ${connectionLabel}.`;
-    sqlMemoryListEl.innerHTML = '<p class="sql-memory-list__empty">Save a statement while this target is active to keep its SQL memory scoped here.</p>';
-    return;
-  }
-
-  sqlMemoryStatusEl.textContent = `${entries.length} scoped SQL statement${entries.length === 1 ? "" : "s"} loaded.`;
-  sqlMemoryListEl.innerHTML = entries
-    .map(
-      (entry) => `
-        <article class="sql-memory-list__item">
-          <pre class="sql-memory-list__statement">${entry.statement}</pre>
-          <p class="sql-memory-list__meta">Seen ${entry.executionCount} time${entry.executionCount === 1 ? "" : "s"} · Last used ${entry.lastSeenAt}</p>
-        </article>
-      `,
-    )
-    .join("");
+  updateDatabaseSelector();
 }
 
 function renderSqlResults(result: SqlQueryResult | null) {
@@ -351,17 +320,140 @@ function closeConnectionModal() {
   connectionModalEl?.close();
 }
 
-async function refreshSqlMemory() {
+function openQuerySearchModal() {
+  querySearchModalEl?.showModal();
+}
+
+function closeQuerySearchModal() {
+  querySearchModalEl?.close();
+}
+
+async function performQuerySearch() {
   try {
+    const searchText = querySearchInputEl?.value ?? "";
+    const dateFrom = queryDateFromEl?.value ?? "";
+    const dateTo = queryDateToEl?.value ?? "";
+
     const entries = await invoke<SqlMemoryEntry[]>("load_sql_memory", {
       connectionId: getActiveConnectionId(),
-      limit: 20,
+      limit: 100,
     });
-    renderSqlMemory(entries);
+
+    let filtered = entries;
+
+    // Filter by search text
+    if (searchText) {
+      const lowerSearch = searchText.toLowerCase();
+      filtered = filtered.filter((entry) =>
+        entry.statement.toLowerCase().includes(lowerSearch)
+      );
+    }
+
+    // Filter by date range
+    if (dateFrom) {
+      const fromDate = new Date(dateFrom).getTime();
+      filtered = filtered.filter(
+        (entry) => new Date(entry.firstSeenAt).getTime() >= fromDate
+      );
+    }
+
+    if (dateTo) {
+      const toDate = new Date(dateTo);
+      toDate.setHours(23, 59, 59, 999);
+      filtered = filtered.filter(
+        (entry) => new Date(entry.firstSeenAt).getTime() <= toDate.getTime()
+      );
+    }
+
+    await populateQuerySearchResults(filtered);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setLauncherMessage(message, true);
   }
+}
+
+async function populateQuerySearchResults(entries: SqlMemoryEntry[]) {
+  if (!querySearchResultsEl) {
+    return;
+  }
+
+  if (!entries.length) {
+    querySearchResultsEl.innerHTML =
+      '<p class="query-search-results__empty">No queries found matching your search criteria.</p>';
+    return;
+  }
+
+  querySearchResultsEl.innerHTML = entries
+    .map(
+      (entry) => `
+      <div class="query-search-result-item" data-query-text="${escapeHtml(entry.statement)}">
+        <p class="query-search-result-item__text">${escapeHtml(entry.statement)}</p>
+        <p class="query-search-result-item__meta">Used ${entry.executionCount} time${entry.executionCount === 1 ? "" : "s"} · Last: ${entry.lastSeenAt}</p>
+      </div>
+    `
+    )
+    .join("");
+
+  // Add click handlers to result items
+  querySearchResultsEl.querySelectorAll(".query-search-result-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      querySearchResultsEl!.querySelectorAll(".query-search-result-item").forEach((i) => {
+        i.classList.remove("is-selected");
+      });
+      item.classList.add("is-selected");
+    });
+  });
+}
+
+async function loadQueryFromSearch() {
+  const selectedItem = querySearchResultsEl?.querySelector(
+    ".query-search-result-item.is-selected"
+  ) as HTMLDivElement | null;
+
+  if (!selectedItem) {
+    setLauncherMessage("Please select a query first.");
+    return;
+  }
+
+  const queryText = selectedItem.dataset.queryText;
+  if (!queryText || !sqlEditorEl) {
+    return;
+  }
+
+  sqlEditorEl.value = queryText;
+  closeQuerySearchModal();
+  setLauncherMessage("Query loaded from search.");
+}
+
+async function refreshSavedQueries() {
+  try {
+    const entries = await invoke<SqlMemoryEntry[]>("load_sql_memory", {
+      connectionId: getActiveConnectionId(),
+      limit: 100,
+    });
+    populateSavedQueriesDropdown(entries);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setLauncherMessage(message, true);
+  }
+}
+
+function populateSavedQueriesDropdown(entries: SqlMemoryEntry[]) {
+  if (!savedQueryDropdownEl) {
+    return;
+  }
+
+  // Reset dropdown to default option only
+  savedQueryDropdownEl.innerHTML = '<option value="">Load a saved query...</option>';
+
+  // Add entries as options
+  entries.forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.statement;
+    option.title = entry.statement; // Full query shown on hover
+    option.textContent = entry.statement.substring(0, 60) + (entry.statement.length > 60 ? "..." : "");
+    savedQueryDropdownEl!.appendChild(option);
+  });
 }
 
 function populatePresetForm(preset: ConnectionPreset | null) {
@@ -395,57 +487,22 @@ function populatePresetForm(preset: ConnectionPreset | null) {
 }
 
 function renderPresetList() {
-  if (!presetListEl || !presetListStatusEl) {
+  if (!databaseSelectorEl) {
     return;
   }
 
-  const internalTarget = `
-    <article class="preset-list__item${activePresetId === null ? " is-active" : ""}">
-      <div class="preset-list__meta">
-        <p class="preset-list__name">Internal workspace database</p>
-        <p class="preset-list__details">SQLITE · Built in</p>
-        <p class="preset-list__details">${escapeHtml(workspaceDatabaseInfo?.path ?? "Local machine")}</p>
-        <p class="preset-list__details">Scoped SQL memory, logs, and protected app records</p>
-      </div>
-      <div class="preset-list__actions">
-        <button type="button" class="preset-action" data-preset-action="use-internal">${activePresetId === null ? "Default" : "Use as Default"}</button>
-      </div>
-    </article>
-  `;
+  // Clear existing options except the internal one
+  databaseSelectorEl.innerHTML = '<option value="internal">Internal workspace database</option>';
 
-  if (!connectionPresets.length) {
-    presetListStatusEl.textContent = "1 built-in database target. No external connections saved yet.";
-    presetListEl.innerHTML = `${internalTarget}<p class="preset-list__empty">Add an external connection from the modal when you need another target.</p>`;
-    updateActivePresetSummary();
-    return;
-  }
+  // Add external connections as options
+  connectionPresets.forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = preset.name;
+    databaseSelectorEl!.appendChild(option);
+  });
 
-  presetListStatusEl.textContent = `1 built-in target and ${connectionPresets.length} external connection${connectionPresets.length === 1 ? "" : "s"}.`;
-
-  presetListEl.innerHTML = internalTarget + connectionPresets
-    .map((preset) => {
-      const isActive = preset.id === activePresetId;
-      const databaseLabel = preset.database || "No default DB";
-
-      return `
-        <article class="preset-list__item${isActive ? " is-active" : ""}">
-          <div class="preset-list__meta">
-            <p class="preset-list__name">${preset.name}</p>
-            <p class="preset-list__details">${preset.engine.toUpperCase()} · ${databaseLabel}</p>
-            <p class="preset-list__details">${preset.host || "No host"}</p>
-            <p class="preset-list__details">${preset.authMode.toUpperCase()}${preset.domain ? ` · ${preset.domain}` : ""}</p>
-          </div>
-          <div class="preset-list__actions">
-            <button type="button" class="preset-action" data-preset-action="activate" data-preset-id="${preset.id}">${isActive ? "Default" : "Use as Default"}</button>
-            <button type="button" class="preset-action" data-preset-action="edit" data-preset-id="${preset.id}">Edit</button>
-            <button type="button" class="preset-action preset-action--danger" data-preset-action="delete" data-preset-id="${preset.id}">Delete</button>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-
-  updateActivePresetSummary();
+  updateDatabaseSelector();
 }
 
 function syncLauncherUrlToActivePreset() {
@@ -455,28 +512,10 @@ function syncLauncherUrlToActivePreset() {
   }
 }
 
-function activatePreset(id: string) {
-  const preset = getPresetById(id);
-  if (!preset) {
-    return;
-  }
-
-  activePresetId = preset.id;
-  populatePresetForm(preset);
-  syncLauncherUrlToActivePreset();
-  renderPresetList();
-  void refreshSqlMemory();
-  setLauncherMessage(`Using external connection ${preset.name} as the default database target.`);
-  void persistPresetStore().catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    setLauncherMessage(message, true);
-  });
-}
-
 function useInternalWorkspaceAsDefault() {
   activePresetId = null;
   renderPresetList();
-  void refreshSqlMemory();
+  void refreshSavedQueries();
   setLauncherMessage("Internal workspace database is now the default.");
   void persistPresetStore().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -554,7 +593,7 @@ async function savePreset(event: SubmitEvent) {
     await persistPresetStore();
     renderPresetList();
     syncLauncherUrlToActivePreset();
-    void refreshSqlMemory();
+    void refreshSavedQueries();
     setLauncherMessage(`Saved external connection ${preset.name}.`);
     closeConnectionModal();
   } catch (error) {
@@ -563,59 +602,6 @@ async function savePreset(event: SubmitEvent) {
   }
 }
 
-function handlePresetListClick(event: Event) {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) {
-    return;
-  }
-
-  const actionButton = target.closest<HTMLElement>("[data-preset-action]");
-  if (!actionButton) {
-    return;
-  }
-
-  const presetId = actionButton.dataset.presetId;
-  const action = actionButton.dataset.presetAction;
-  if (!presetId || !action) {
-    return;
-  }
-
-  if (action === "activate") {
-    activatePreset(presetId);
-    return;
-  }
-
-  if (action === "use-internal") {
-    useInternalWorkspaceAsDefault();
-    return;
-  }
-
-  if (action === "edit") {
-    populatePresetForm(getPresetById(presetId));
-    openConnectionModal();
-    setLauncherMessage("Connection loaded into the editor.");
-    return;
-  }
-
-  if (action === "delete") {
-    connectionPresets = connectionPresets.filter((preset) => preset.id !== presetId);
-    if (activePresetId === presetId) {
-      activePresetId = null;
-      syncLauncherUrlToActivePreset();
-    }
-    void persistPresetStore()
-      .then(() => {
-        renderPresetList();
-        resetPresetForm();
-        void refreshSqlMemory();
-        setLauncherMessage("External connection deleted. Internal workspace database is now the default.");
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setLauncherMessage(message, true);
-      });
-  }
-}
 function getTargetUrl() {
   if (!launcherUrlEl) {
     throw new Error("Launcher URL input is unavailable.");
@@ -739,36 +725,6 @@ async function testPresetConnection() {
   }
 }
 
-async function saveSqlMemory(event: SubmitEvent) {
-  event.preventDefault();
-
-  if (!sqlMemoryStatementEl) {
-    return;
-  }
-
-  const statement = sqlMemoryStatementEl.value.trim();
-  if (!statement) {
-    setLauncherMessage("Enter a SQL statement to save into memory.", true);
-    return;
-  }
-
-  try {
-    saveSqlMemoryButtonEl?.toggleAttribute("disabled", true);
-    await invoke("record_sql_memory", {
-      connectionId: getActiveConnectionId(),
-      statement,
-    });
-    sqlMemoryStatementEl.value = "";
-    await refreshSqlMemory();
-    setLauncherMessage(`Saved SQL memory for ${getActiveConnectionLabel()}.`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    setLauncherMessage(message, true);
-  } finally {
-    saveSqlMemoryButtonEl?.toggleAttribute("disabled", false);
-  }
-}
-
 async function runSql(event: SubmitEvent) {
   event.preventDefault();
 
@@ -794,10 +750,7 @@ async function runSql(event: SubmitEvent) {
       connectionId: getActiveConnectionId(),
       statement: sql,
     });
-    if (sqlMemoryStatementEl && !sqlMemoryStatementEl.value.trim()) {
-      sqlMemoryStatementEl.value = sql;
-    }
-    await refreshSqlMemory();
+    await refreshSavedQueries();
     setLauncherMessage(result.message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -840,23 +793,28 @@ window.addEventListener("DOMContentLoaded", () => {
   launchMenuButtonEl = document.querySelector("#launch-menu-button");
   launchMenuEl = document.querySelector("#launch-menu");
   footerBrowserLinkEl = document.querySelector("#footer-browser-link");
-  activePresetNameEl = document.querySelector("#active-preset-name");
-  activePresetSummaryEl = document.querySelector("#active-preset-summary");
+  databaseSelectorEl = document.querySelector("#database-selector");
+  toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
+  addDatabaseButtonEl = document.querySelector("#add-database-button");
   workspaceDbPathEl = document.querySelector("#workspace-db-path");
   workspaceDbSummaryEl = document.querySelector("#workspace-db-summary");
   useInternalDbButtonEl = document.querySelector("#use-internal-db-button");
   sqlEditorFormEl = document.querySelector("#sql-editor-form");
   sqlEditorEl = document.querySelector("#sql-editor");
+  savedQueryDropdownEl = document.querySelector("#saved-query-dropdown");
+  querySearchButtonEl = document.querySelector("#query-search-button");
   runSqlButtonEl = document.querySelector("#run-sql-button");
   clearSqlButtonEl = document.querySelector("#clear-sql-button");
   sqlResultsStatusEl = document.querySelector("#sql-results-status");
   sqlResultsOutputEl = document.querySelector("#sql-results-output");
-  sqlMemoryFormEl = document.querySelector("#sql-memory-form");
-  sqlMemoryStatementEl = document.querySelector("#sql-memory-statement");
-  saveSqlMemoryButtonEl = document.querySelector("#save-sql-memory-button");
-  sqlMemoryScopeEl = document.querySelector("#sql-memory-scope");
-  sqlMemoryStatusEl = document.querySelector("#sql-memory-status");
-  sqlMemoryListEl = document.querySelector("#sql-memory-list");
+  querySearchModalEl = document.querySelector("#query-search-modal");
+  querySearchInputEl = document.querySelector("#query-search-input");
+  queryDateFromEl = document.querySelector("#query-date-from");
+  queryDateToEl = document.querySelector("#query-date-to");
+  querySearchResultsEl = document.querySelector("#query-search-results");
+  loadQueryFromSearchButtonEl = document.querySelector("#load-query-from-search-button");
+  clearQuerySearchButtonEl = document.querySelector("#clear-query-search-button");
+  closeQuerySearchModalButtonEl = document.querySelector("#close-query-search-modal-button");
   presetFormEl = document.querySelector("#preset-form");
   presetIdEl = document.querySelector("#preset-id");
   presetNameEl = document.querySelector("#preset-name");
@@ -871,10 +829,7 @@ window.addEventListener("DOMContentLoaded", () => {
   presetDomainEl = document.querySelector("#preset-domain");
   testPresetButtonEl = document.querySelector("#test-preset-button");
   resetPresetButtonEl = document.querySelector("#reset-preset-button");
-  presetListEl = document.querySelector("#preset-list");
-  presetListStatusEl = document.querySelector("#preset-list-status");
   connectionModalEl = document.querySelector("#connection-modal");
-  openConnectionModalButtonEl = document.querySelector("#open-connection-modal-button");
   closeConnectionModalButtonEl = document.querySelector("#close-connection-modal-button");
   installTopHorizontalScrollbar();
   renderSqlResults(null);
@@ -883,7 +838,7 @@ window.addEventListener("DOMContentLoaded", () => {
     .then((info) => {
       workspaceDatabaseInfo = info;
       renderWorkspaceDatabaseInfo();
-      void refreshSqlMemory();
+      void refreshSavedQueries();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -901,7 +856,7 @@ window.addEventListener("DOMContentLoaded", () => {
           await persistPresetStore();
           renderPresetList();
           syncLauncherUrlToActivePreset();
-          void refreshSqlMemory();
+          void refreshSavedQueries();
           setLauncherMessage("Migrated existing presets into Rusty Pythia storage.");
           return;
         }
@@ -911,7 +866,7 @@ window.addEventListener("DOMContentLoaded", () => {
       activePresetId = store.activePresetId;
       renderPresetList();
       syncLauncherUrlToActivePreset();
-      void refreshSqlMemory();
+      void refreshSavedQueries();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -931,8 +886,19 @@ window.addEventListener("DOMContentLoaded", () => {
     void savePreset(event);
   });
 
-  sqlMemoryFormEl?.addEventListener("submit", (event) => {
-    void saveSqlMemory(event);
+  savedQueryDropdownEl?.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    const query = target.value;
+
+    if (query && sqlEditorEl) {
+      sqlEditorEl.value = query;
+      setLauncherMessage("Query loaded into workspace.");
+      target.value = ""; // Reset dropdown
+    }
+  });
+
+  querySearchButtonEl?.addEventListener("click", () => {
+    openQuerySearchModal();
   });
 
   resetPresetButtonEl?.addEventListener("click", () => {
@@ -952,7 +918,42 @@ window.addEventListener("DOMContentLoaded", () => {
     useInternalWorkspaceAsDefault();
   });
 
-  openConnectionModalButtonEl?.addEventListener("click", () => {
+  databaseSelectorEl?.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    const selectedValue = target.value;
+
+    // Switch to selected database
+    if (selectedValue === "internal") {
+      activePresetId = null;
+    } else {
+      activePresetId = selectedValue;
+    }
+
+    void persistPresetStore();
+    syncLauncherUrlToActivePreset();
+    void refreshSavedQueries();
+    updateDatabaseSelector();
+    setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
+  });
+
+  toggleFavoriteDatabaseEl?.addEventListener("click", () => {
+    // When internal is active, it's already the default (is-favorite state)
+    // This button doesn't need to do anything more since internal is always the implicit default
+    // But we can optionally show a message
+    if (activePresetId === null) {
+      setLauncherMessage("Internal workspace database is your default.");
+    } else {
+      // Switch to internal as default
+      activePresetId = null;
+      void persistPresetStore();
+      syncLauncherUrlToActivePreset();
+      void refreshSavedQueries();
+      updateDatabaseSelector();
+      setLauncherMessage("Internal workspace database is now your default.");
+    }
+  });
+
+  addDatabaseButtonEl?.addEventListener("click", () => {
     resetPresetForm();
     openConnectionModal();
   });
@@ -961,12 +962,35 @@ window.addEventListener("DOMContentLoaded", () => {
     closeConnectionModal();
   });
 
-  testPresetButtonEl?.addEventListener("click", () => {
-    void testPresetConnection();
+  closeQuerySearchModalButtonEl?.addEventListener("click", () => {
+    closeQuerySearchModal();
   });
 
-  presetListEl?.addEventListener("click", (event) => {
-    handlePresetListClick(event);
+  querySearchInputEl?.addEventListener("input", () => {
+    void performQuerySearch();
+  });
+
+  queryDateFromEl?.addEventListener("change", () => {
+    void performQuerySearch();
+  });
+
+  queryDateToEl?.addEventListener("change", () => {
+    void performQuerySearch();
+  });
+
+  clearQuerySearchButtonEl?.addEventListener("click", () => {
+    if (querySearchInputEl) querySearchInputEl.value = "";
+    if (queryDateFromEl) queryDateFromEl.value = "";
+    if (queryDateToEl) queryDateToEl.value = "";
+    void populateQuerySearchResults([]);
+  });
+
+  loadQueryFromSearchButtonEl?.addEventListener("click", () => {
+    void loadQueryFromSearch();
+  });
+
+  testPresetButtonEl?.addEventListener("click", () => {
+    void testPresetConnection();
   });
 
   launchMenuButtonEl?.addEventListener("click", () => {

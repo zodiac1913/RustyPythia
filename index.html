@@ -13,45 +13,39 @@
       <header class="app-shell__header">
         <div class="app-shell__brand-block">
           <div class="launcher-brand">
-            <div>
-              <p class="app-shell__eyebrow">Rust-native SQL workspace</p>
-              <h1 id="launcher-title">Rusty Pythia</h1>
-            </div>
+            <img src="/src/ui/pics/RustyPattern.png" alt="" class="launcher-brand__pattern launcher-brand__pattern--left" />
+            <h1 id="launcher-title">Rusty Pythia</h1>
+            <img src="/src/ui/pics/RustyPattern.png" alt="" class="launcher-brand__pattern launcher-brand__pattern--right" />
           </div>
-          <p class="launcher-copy">
-            Rusty Pythia keeps its own internal SQLite workspace. External SQL
-            apps and saved connections are optional helpers, not a requirement.
-          </p>
-        </div>
-
-        <div class="app-shell__status-card" aria-label="Launch mode summary">
-          <p class="app-shell__status-label">Default Database Target</p>
-          <p class="app-shell__status-value" id="active-preset-name">
-            Internal workspace database
-          </p>
-          <p class="app-shell__status-copy">
-            <span id="active-preset-summary"
-              >Rusty Pythia still has its internal workspace database even when
-              no external connection is selected.</span
-            >
-          </p>
         </div>
       </header>
 
-      <section class="workspace-shell" aria-labelledby="workspace-title">
+      <section class="workspace-shell">
         <div class="workspace-shell__main">
           <section class="launcher-card" aria-labelledby="workspace-title">
-            <div class="workspace-shell__heading">
-              <h2 id="workspace-title">SQL Workspace</h2>
-              <p>
-                Rusty Pythia opens to a SQL interface first. The built-in
-                internal workspace database is the default until you switch to
-                another target.
-              </p>
+            <div class="workspace-shell__heading workspace-shell__heading--with-controls">
+              <div>
+                <h2 id="workspace-title">SQL Workspace</h2>
+              </div>
+              <div class="database-selector-container d-flex align-items-center gap-2">
+                <select id="database-selector" class="database-selector form-select form-select-sm" style="max-width: 250px" aria-label="Select database target">
+                  <option value="internal">Internal workspace database</option>
+                </select>
+                <button type="button" id="toggle-favorite-database" class="favorite-toggle btn btn-sm btn-outline-secondary" aria-label="Set as default" title="Set as default">★</button>
+                <button type="button" id="add-database-button" class="add-database-button btn btn-sm btn-outline-secondary" aria-label="Add external connection" title="Add external connection">+</button>
+              </div>
             </div>
 
             <form class="sql-editor-form" id="sql-editor-form">
-              <label for="sql-editor">SQL query</label>
+              <div class="sql-editor-form__label-row d-flex align-items-center gap-3">
+                <label for="sql-editor" class="form-label mb-0 flex-shrink-0">SQL query</label>
+                <div class="sql-editor-form__controls d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                  <select id="saved-query-dropdown" class="saved-query-dropdown form-select form-select-sm" style="min-width: 200px" aria-label="Load saved query" title="Select a saved query to load">
+                    <option value="">Load a saved query...</option>
+                  </select>
+                  <button type="button" id="query-search-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="Search saved queries" title="Search and filter saved queries by date">Query Search</button>
+                </div>
+              </div>
               <textarea
                 id="sql-editor"
                 rows="10"
@@ -76,37 +70,6 @@
             </div>
           </section>
 
-          <section class="info-card" aria-labelledby="sql-memory-title">
-            <div class="workspace-shell__heading workspace-shell__heading--compact">
-              <h2 id="sql-memory-title">Scoped SQL Memory</h2>
-              <p>
-                Statements saved here belong only to the current database
-                target. Rusty Pythia does not recall DB A statements while you
-                are working in DB B.
-              </p>
-            </div>
-
-            <form class="sql-memory-form" id="sql-memory-form">
-              <label for="sql-memory-statement">Record SQL statement</label>
-              <textarea
-                id="sql-memory-statement"
-                rows="5"
-                placeholder="SELECT * FROM study_subjects WHERE subject_id = ?"
-                spellcheck="false"
-              ></textarea>
-              <div class="sql-memory-form__actions">
-                <button type="submit" id="save-sql-memory-button">
-                  Save to SQL Memory
-                </button>
-              </div>
-            </form>
-
-            <div class="preset-list__header sql-memory-list__header">
-              <h3 id="sql-memory-scope">Memory for internal workspace database</h3>
-              <p id="sql-memory-status">Loading scoped SQL memory...</p>
-            </div>
-            <div id="sql-memory-list" class="sql-memory-list" aria-live="polite"></div>
-          </section>
 
           <section class="info-card" aria-labelledby="launch-tools-title">
             <form class="launcher-form" id="launcher-form">
@@ -159,20 +122,7 @@
           </section>
         </div>
 
-        <aside class="workspace-shell__side" aria-label="Workspace notes">
-          <section class="info-card">
-            <div class="preset-list__header">
-              <h2>Database Targets</h2>
-              <button type="button" class="preset-action" id="open-connection-modal-button">Add External Connection</button>
-            </div>
-            <p class="section-note">
-              The internal workspace database is built in. Add external targets
-              through the modal only when you need them.
-            </p>
-            <p id="preset-list-status">Local to this app profile.</p>
-            <div id="preset-list" class="preset-list" aria-live="polite"></div>
-          </section>
-        </aside>
+
       </section>
 
       <footer class="app-shell__footer">
@@ -264,6 +214,42 @@
           <button type="submit" id="save-preset-button">Save Connection</button>
           <button type="button" id="test-preset-button">Test Connection</button>
           <button type="button" id="reset-preset-button">New Connection</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="query-search-modal" class="query-search-modal" aria-labelledby="query-search-modal-title">
+      <form class="query-search-form" id="query-search-form" method="dialog">
+        <div class="query-search-modal__header">
+          <h2 id="query-search-modal-title">Search Saved Queries</h2>
+          <button type="button" class="footer-link" id="close-query-search-modal-button">Close</button>
+        </div>
+
+        <div class="query-search-form__row">
+          <div>
+            <label for="query-search-input">Search queries</label>
+            <input id="query-search-input" type="text" placeholder="Enter keyword or SQL text..." />
+          </div>
+        </div>
+
+        <div class="query-search-form__row">
+          <div>
+            <label for="query-date-from">From date</label>
+            <input id="query-date-from" type="date" />
+          </div>
+          <div>
+            <label for="query-date-to">To date</label>
+            <input id="query-date-to" type="date" />
+          </div>
+        </div>
+
+        <div class="query-search-results" id="query-search-results">
+          <p class="query-search-results__empty">Enter search criteria and results will appear here.</p>
+        </div>
+
+        <div class="query-search-form__actions">
+          <button type="button" id="load-query-from-search-button" class="query-search-form__button">Load Query to Workspace</button>
+          <button type="button" id="clear-query-search-button" class="query-search-form__button">Clear Search</button>
         </div>
       </form>
     </dialog>
