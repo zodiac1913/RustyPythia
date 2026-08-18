@@ -39,7 +39,12 @@
             <form class="sql-editor-form" id="sql-editor-form">
               <div class="sql-editor-form__label-row d-flex align-items-center gap-3">
                 <label for="sql-editor" class="form-label mb-0 flex-shrink-0">SQL query</label>
+                <span id="editor-mode-badge" class="editor-mode-badge" data-mode="pythiajs">PythiaJS authoring</span>
                 <div class="sql-editor-form__controls d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                  <select id="query-language" class="query-language form-select form-select-sm" aria-label="Query language" title="Choose the query authoring language">
+                    <option value="pythia">PythiaJS</option>
+                    <option value="sql">SQL</option>
+                  </select>
                   <select id="saved-query-dropdown" class="saved-query-dropdown form-select form-select-sm" style="min-width: 200px" aria-label="Load saved query" title="Select a saved query to load">
                     <option value="">Load a saved query...</option>
                   </select>
@@ -52,6 +57,21 @@
                 placeholder="SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
                 spellcheck="false"
               ></textarea>
+              <select id="squerrl-sort-overlay" class="squerrl-sort-overlay" aria-label="Optional SQuerL sort order" hidden>
+                <option value="">NO SORT</option>
+                <option value="~up ">~up</option>
+                <option value="~down ">~down</option>
+              </select>
+              <section id="squerrl-picker" class="squerrl-picker" aria-label="SQuerrl suggestions" hidden>
+                <div class="squerrl-picker__header">
+                  <div>
+                    <span class="squerrl-picker__eyebrow">SQuerrl</span>
+                    <h3 id="squerrl-picker-title">Choose a table</h3>
+                  </div>
+                  <span id="squerrl-picker-status" class="squerrl-picker__status"></span>
+                </div>
+                <div id="squerrl-picker-options" class="squerrl-picker__options"></div>
+              </section>
               <div class="sql-editor-form__actions">
                 <button type="submit" id="run-sql-button">Run SQL</button>
                 <button type="button" id="clear-sql-button">Clear</button>

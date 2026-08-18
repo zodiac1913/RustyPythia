@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::webview::{NewWindowFeatures, NewWindowResponse, WebviewWindow};
 use tauri::window::Color;
 use tiberius::{AuthMethod, Client as TiberiusClient, Config as TiberiusConfig, EncryptionLevel};
@@ -68,6 +68,13 @@ struct SqlQueryResult {
     rows: Vec<Vec<String>>,
     rows_affected: usize,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SqlSchemaTable {
+    name: String,
+    fields: Vec<String>,
 }
 
 const INTERNAL_CONNECTION_ID: &str = "__internal_workspace__";
@@ -312,13 +319,6 @@ fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, S
                 FOREIGN KEY(connection_id) REFERENCES connection_catalog(connection_id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS sql_statement_history (
-                statement TEXT PRIMARY KEY,
-                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                execution_count INTEGER NOT NULL DEFAULT 1
-            );
-
             CREATE TABLE IF NOT EXISTS sql_statement_memory (
                 connection_id TEXT NOT NULL,
                 statement TEXT NOT NULL,
@@ -341,32 +341,35 @@ fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, S
     let bootstrap_store = PresetStore::default();
     sync_workspace_connection_catalog(&connection, &bootstrap_store)?;
 
-    connection
-        .execute_batch(
-            "
-            INSERT OR IGNORE INTO sql_statement_memory (
-                connection_id,
-                statement,
-                first_seen_at,
-                last_seen_at,
-                execution_count
-            )
-            SELECT
-                '__internal_workspace__',
-                statement,
-                first_seen_at,
-                last_seen_at,
-                execution_count
-            FROM sql_statement_history;
-            ",
+    let has_legacy_history = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sql_statement_history')",
+            [],
+            |row| row.get::<_, i64>(0),
         )
-        .map_err(|err| {
-            format!(
-                "Failed to migrate legacy SQL memory into scoped storage {}: {}",
-                workspace_path.display(),
-                err
+        .map_err(|err| format!("Failed to inspect legacy SQL history: {}", err))?;
+
+    if has_legacy_history != 0 {
+        connection
+            .execute(
+                "
+                INSERT OR IGNORE INTO sql_statement_memory (
+                    connection_id,
+                    statement,
+                    first_seen_at,
+                    last_seen_at,
+                    execution_count
+                )
+                SELECT ?1, statement, first_seen_at, last_seen_at, execution_count
+                FROM sql_statement_history
+                ",
+                [INTERNAL_CONNECTION_ID],
             )
-        })?;
+            .map_err(|err| format!("Failed to migrate legacy SQL memory: {}", err))?;
+        connection
+            .execute("DROP TABLE sql_statement_history", [])
+            .map_err(|err| format!("Failed to remove legacy SQL history: {}", err))?;
+    }
 
     Ok(WorkspaceDatabaseInfo {
         path: workspace_path.display().to_string(),
@@ -479,24 +482,6 @@ fn record_sql_memory(
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
     let connection = open_workspace_database(&app)?;
     ensure_connection_exists(&connection, &connection_id)?;
-
-    connection
-        .execute(
-            "
-            INSERT INTO sql_statement_history (
-                statement,
-                first_seen_at,
-                last_seen_at,
-                execution_count
-            )
-            VALUES (?1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
-            ON CONFLICT(statement) DO UPDATE SET
-                last_seen_at = CURRENT_TIMESTAMP,
-                execution_count = sql_statement_history.execution_count + 1
-            ",
-            [normalized_statement],
-        )
-        .map_err(|err| format!("Failed to record global SQL memory: {}", err))?;
 
     connection
         .execute(
@@ -650,6 +635,61 @@ fn execute_sql_query(
             if rows_affected == 1 { "" } else { "s" }
         ),
     })
+}
+
+#[tauri::command]
+fn load_sql_schema(
+    app: AppHandle,
+    connection_id: Option<String>,
+) -> Result<Vec<SqlSchemaTable>, String> {
+    let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
+    let (target_path, _) = resolve_sqlite_query_target(&app, &connection_id)?;
+    let connection = SqliteConnection::open(&target_path).map_err(|err| {
+        format!(
+            "Failed to open schema target at {}: {}",
+            target_path.display(),
+            err
+        )
+    })?;
+
+    let mut table_statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name COLLATE NOCASE",
+        )
+        .map_err(|err| format!("Failed to prepare schema query: {}", err))?;
+    let mut table_names = table_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("Failed to read schema tables: {}", err))?;
+
+    let mut tables = Vec::new();
+    while let Some(table_name) = table_names
+        .next()
+        .transpose()
+        .map_err(|err| format!("Failed to read schema table name: {}", err))?
+    {
+        let quoted_name = table_name.replace('"', "\"\"");
+        let pragma = format!("PRAGMA table_info(\"{}\")", quoted_name);
+        let mut field_statement = connection
+            .prepare(&pragma)
+            .map_err(|err| format!("Failed to inspect table {}: {}", table_name, err))?;
+        let mut fields = field_statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("Failed to read fields for table {}: {}", table_name, err))?;
+        let mut field_names = Vec::new();
+        while let Some(field_name) = fields
+            .next()
+            .transpose()
+            .map_err(|err| format!("Failed to read field for table {}: {}", table_name, err))?
+        {
+            field_names.push(field_name);
+        }
+        tables.push(SqlSchemaTable {
+            name: table_name,
+            fields: field_names,
+        });
+    }
+
+    Ok(tables)
 }
 
 #[tauri::command]
@@ -886,16 +926,20 @@ fn build_internal_window(app: &tauri::App) -> Result<(), String> {
         .first()
         .ok_or_else(|| "Missing main window configuration.".to_string())?;
 
-    if app.get_webview_window(&window_config.label).is_some() {
+    if let Some(window) = app.get_webview_window(&window_config.label) {
         eprintln!(
             "Reusing existing main webview window during setup: {}",
             window_config.label
         );
-        return Ok(());
+        return window
+            .set_size(LogicalSize::new(1360.0, 900.0))
+            .map_err(|err| format!("Failed to set startup window size: {}", err));
     }
 
     WebviewWindowBuilder::from_config(app, window_config)
         .map_err(|err| format!("Failed to load Tauri window config: {}", err))?
+        .inner_size(1360.0, 900.0)
+        .min_inner_size(1024.0, 700.0)
         .background_color(rusty_window_color())
         .build()
         .map(|_| ())
@@ -909,6 +953,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_sql_window,
             execute_sql_query,
+            load_sql_schema,
             record_sql_memory,
             load_sql_memory,
             load_workspace_database_info,

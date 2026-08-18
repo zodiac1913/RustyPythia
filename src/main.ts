@@ -17,10 +17,26 @@ let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
+let queryLanguageEl: HTMLSelectElement | null;
 let savedQueryDropdownEl: HTMLSelectElement | null;
 let querySearchButtonEl: HTMLButtonElement | null;
 let runSqlButtonEl: HTMLButtonElement | null;
 let clearSqlButtonEl: HTMLButtonElement | null;
+let squerrlPickerEl: HTMLElement | null;
+let squerrlPickerTitleEl: HTMLElement | null;
+let squerrlPickerStatusEl: HTMLElement | null;
+let squerrlPickerOptionsEl: HTMLElement | null;
+let squerrlTableSearchEl: HTMLInputElement | null;
+let squerrlSortOverlayEl: HTMLSelectElement | null;
+let squerrlSelectedIndex = 0;
+let squerrlSchemaCacheKey = "";
+let squerrlSchemaCache: SqlSchemaTable[] | null = null;
+let squerrlRequestId = 0;
+let activeQueryLanguage: QueryLanguage | null = null;
+let activeSQuerrlTableName: string | null = null;
+let activeSQuerrlStage: "fields" | "options" | "conditions" | null = null;
+let selectedSQuerrlFields = new Set<string>();
+let squerrlConditionKeyboardController: AbortController | null = null;
 let sqlResultsStatusEl: HTMLElement | null;
 let sqlResultsOutputEl: HTMLElement | null;
 let querySearchModalEl: HTMLDialogElement | null;
@@ -94,6 +110,41 @@ type SqlQueryResult = {
   rows: string[][];
   rowsAffected: number;
   message: string;
+};
+
+type SqlSchemaTable = {
+  name: string;
+  fields: string[];
+};
+
+type SQuerrlSuggestion = {
+  label: string;
+  value: string;
+  detail?: string;
+};
+
+type QueryLanguage = "pythia" | "sql";
+
+const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
+  sql: [
+    { label: "SELECT", value: "SELECT ", detail: "choose fields" },
+    { label: "INSERT", value: "INSERT ", detail: "add rows" },
+    { label: "UPDATE", value: "UPDATE ", detail: "change rows" },
+    { label: "DELETE", value: "DELETE ", detail: "remove rows" },
+    { label: "DROP", value: "DROP ", detail: "remove an object" },
+    { label: "CREATE", value: "CREATE ", detail: "create an object" },
+    { label: "ALTER", value: "ALTER ", detail: "change an object" },
+    { label: "TRUNCATE", value: "TRUNCATE ", detail: "empty a table" },
+    { label: "RENAME", value: "RENAME ", detail: "rename an object" },
+    { label: "REVOKE", value: "REVOKE ", detail: "remove permissions" },
+    { label: "GRANT", value: "GRANT ", detail: "assign permissions" },
+  ],
+  pythia: [
+    { label: "SELECT", value: "SELECT ", detail: "choose fields" },
+    { label: "FROM", value: "FROM ", detail: "choose a table" },
+    { label: "WHERE", value: "WHERE ", detail: "filter rows" },
+    { label: "ORDER BY", value: "ORDER BY ", detail: "sort rows" },
+  ],
 };
 
 const PRESET_STORAGE_KEY = "rusty-pythia.connection-presets";
@@ -456,6 +507,534 @@ function populateSavedQueriesDropdown(entries: SqlMemoryEntry[]) {
   });
 }
 
+function hideSQuerrlPicker() {
+  squerrlConditionKeyboardController?.abort();
+  squerrlConditionKeyboardController = null;
+  if (squerrlPickerEl) {
+    squerrlPickerEl.hidden = true;
+  }
+  squerrlTableSearchEl = null;
+  squerrlSelectedIndex = 0;
+}
+
+function openSQuerrlSortOverlay() {
+  if (!squerrlSortOverlayEl || !sqlEditorEl) {
+    return;
+  }
+
+  activeSQuerrlStage = "conditions";
+  squerrlSortOverlayEl.hidden = false;
+  squerrlSortOverlayEl.focus();
+}
+
+function constrainSQuerrlPickerFocus(onEscape?: () => void) {
+  if (!squerrlPickerEl) {
+    return;
+  }
+
+  const pickerEl = squerrlPickerEl;
+  pickerEl.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onEscape?.();
+      return;
+    }
+    if (event.key !== "Tab") {
+      return;
+    }
+
+    const controls = Array.from(
+      pickerEl.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled])')
+    );
+    const activeIndex = controls.indexOf(document.activeElement as HTMLElement);
+    const nextIndex = event.shiftKey
+      ? (activeIndex - 1 + controls.length) % controls.length
+      : (activeIndex + 1) % controls.length;
+    event.preventDefault();
+    controls[nextIndex]?.focus();
+  };
+}
+
+function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
+  if (!squerrlPickerEl) {
+    return;
+  }
+
+  const modeChoices = ["has ", "not "];
+  const fieldChoices = table.fields;
+  const operatorChoices = ["=", "!=", ">", "<", ">=", "<=", "contains"];
+  squerrlPickerEl.setAttribute("aria-label", `SQuerL condition builder for ${table.name}`);
+  squerrlPickerEl.innerHTML = `<div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerL</span><h3>Build criteria</h3></div><span class="squerrl-picker__status">Arrows move controls. Enter or click changes a choice.</span></div><div class="squerrl-condition-builder" aria-label="SQuerL condition builder"><button type="button" id="squerrl-condition-mode" class="squerrl-condition-choice" data-value="has " aria-label="Condition mode">has</button><button type="button" id="squerrl-condition-field" class="squerrl-condition-choice" data-value="${escapeHtml(fieldChoices[0] ?? "")}" aria-label="Condition field">${escapeHtml(fieldChoices[0] ?? "")}</button><button type="button" id="squerrl-condition-operator" class="squerrl-condition-choice" data-value="=" aria-label="Condition operator">=</button><input id="squerrl-condition-value" type="text" placeholder="Value or variable" aria-label="Condition value or variable" /><button type="button" id="squerrl-add-condition">Add condition</button><button type="button" id="squerrl-finish-conditions">Finish</button></div>`;
+  squerrlPickerEl.onkeydown = null;
+  squerrlPickerOptionsEl = null;
+  squerrlTableSearchEl = null;
+  squerrlPickerEl.hidden = false;
+
+  const modeEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-mode");
+  const fieldEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-field");
+  const operatorEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-operator");
+  const valueEl = squerrlPickerEl.querySelector<HTMLInputElement>("#squerrl-condition-value");
+  const addButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-add-condition");
+  const finishButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-finish-conditions");
+  const controls = [modeEl, fieldEl, operatorEl, valueEl, addButton, finishButton].filter(
+    (control): control is HTMLInputElement | HTMLButtonElement => Boolean(control)
+  );
+
+  squerrlConditionKeyboardController?.abort();
+  squerrlConditionKeyboardController = new AbortController();
+  window.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
+    const movesForward = event.key === "ArrowRight" || event.key === "ArrowDown" || key === "d" || key === "s";
+    const movesBackward = event.key === "ArrowLeft" || event.key === "ArrowUp" || key === "a" || key === "w";
+    const movesByTab = event.key === "Tab";
+    if (!movesForward && !movesBackward && !movesByTab) {
+      return;
+    }
+    const activeIndex = controls.indexOf(document.activeElement as HTMLInputElement | HTMLButtonElement);
+    if (activeIndex < 0) {
+      return;
+    }
+    const nextIndex = movesBackward || (movesByTab && event.shiftKey)
+      ? (activeIndex - 1 + controls.length) % controls.length
+      : (activeIndex + 1) % controls.length;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    controls[nextIndex].focus();
+  }, { capture: true, signal: squerrlConditionKeyboardController.signal });
+
+  const cycleChoice = (button: HTMLButtonElement | null, choices: string[]) => {
+    if (!button || !choices.length) {
+      return;
+    }
+    const currentIndex = choices.indexOf(button.dataset.value ?? "");
+    const value = choices[(currentIndex + 1) % choices.length];
+    button.dataset.value = value;
+    button.textContent = value.trim();
+  };
+  modeEl?.addEventListener("click", () => cycleChoice(modeEl, modeChoices));
+  fieldEl?.addEventListener("click", () => cycleChoice(fieldEl, fieldChoices));
+  operatorEl?.addEventListener("click", () => cycleChoice(operatorEl, operatorChoices));
+
+  controls.forEach((control, controlIndex) => {
+    control.onkeydown = (event) => {
+      const key = event.key.toLowerCase();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideSQuerrlPicker();
+        sqlEditorEl?.focus();
+        return;
+      }
+      const movesForward = event.key === "ArrowRight" || event.key === "ArrowDown" || key === "d" || key === "s";
+      const movesBackward = event.key === "ArrowLeft" || event.key === "ArrowUp" || key === "a" || key === "w";
+      const movesByTab = event.key === "Tab";
+      if (!movesForward && !movesBackward && !movesByTab) {
+        return;
+      }
+      const nextIndex = movesBackward || (movesByTab && event.shiftKey)
+        ? (controlIndex - 1 + controls.length) % controls.length
+        : (controlIndex + 1) % controls.length;
+      event.preventDefault();
+      event.stopPropagation();
+      controls[nextIndex].focus();
+    };
+  });
+
+  addButton?.addEventListener("click", () => {
+    if (!sqlEditorEl || !modeEl || !fieldEl || !operatorEl || !valueEl?.value.trim()) {
+      return;
+    }
+    const cursor = sqlEditorEl.selectionStart;
+    sqlEditorEl.setRangeText(`${modeEl.dataset.value}${fieldEl.dataset.value} ${operatorEl.dataset.value} ${valueEl.value.trim()} `, cursor, cursor, "end");
+    valueEl.value = "";
+    valueEl.focus();
+  });
+  finishButton?.addEventListener("click", () => {
+    hideSQuerrlPicker();
+    sqlEditorEl?.focus();
+  });
+  modeEl?.focus();
+}
+
+function getSQuerrlContext() {
+  if (!sqlEditorEl) {
+    return null;
+  }
+
+  const cursor = sqlEditorEl.selectionStart;
+  const beforeCursor = sqlEditorEl.value.slice(0, cursor);
+  const tokenMatch = /[A-Za-z_][A-Za-z0-9$]*$/.exec(beforeCursor);
+  const prefix = tokenMatch?.[0] ?? "";
+  const beforeToken = beforeCursor.slice(0, beforeCursor.length - prefix.length);
+  const normalized = beforeToken.toLowerCase();
+  const fromMatch = /\bfrom\s+([a-z_][a-z0-9$]*)?$/.exec(normalized);
+  const hasFrom = /\bfrom\b/i.test(beforeCursor);
+  const hasClause = /\b(where|order\s+by)\b/i.test(beforeCursor);
+  const trigger = Boolean(prefix) || /\s$/.test(beforeCursor);
+  const language = activeQueryLanguage ?? (queryLanguageEl?.value ?? "pythia") as QueryLanguage;
+
+  return { cursor, beforeCursor, beforeToken, prefix, fromMatch, hasFrom, hasClause, trigger, language };
+}
+
+function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
+  const context = getSQuerrlContext();
+  if (!sqlEditorEl || !context) {
+    return;
+  }
+
+  if (!context.beforeCursor.trim()) {
+    const selectedTable = squerrlSchemaCache?.find(
+      (table) => table.name.toLowerCase() === suggestion.value.trim().toLowerCase()
+    );
+    activeQueryLanguage = selectedTable ? "pythia" : "sql";
+    activeSQuerrlTableName = selectedTable?.name ?? null;
+    activeSQuerrlStage = selectedTable ? "fields" : null;
+    if (queryLanguageEl) {
+      queryLanguageEl.value = activeQueryLanguage;
+    }
+  }
+
+  const insertStart = context.cursor - context.prefix.length;
+  sqlEditorEl.setRangeText(suggestion.value, insertStart, context.cursor, "end");
+  sqlEditorEl.focus();
+  hideSQuerrlPicker();
+}
+
+function setSQuerrlSelection(index: number) {
+  if (!squerrlPickerOptionsEl) {
+    return;
+  }
+
+  const options = Array.from(squerrlPickerOptionsEl.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]"));
+  if (!options.length) {
+    return;
+  }
+
+  squerrlSelectedIndex = (index + options.length) % options.length;
+  options.forEach((option, optionIndex) => {
+    option.setAttribute("aria-selected", String(optionIndex === squerrlSelectedIndex));
+    option.classList.toggle("is-selected", optionIndex === squerrlSelectedIndex);
+  });
+  options[squerrlSelectedIndex].scrollIntoView({ block: "nearest" });
+}
+
+function focusSQuerrlSelection(index: number) {
+  if (!squerrlPickerOptionsEl) {
+    return;
+  }
+
+  setSQuerrlSelection(index);
+  const options = squerrlPickerOptionsEl.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]");
+  options[squerrlSelectedIndex]?.focus();
+}
+
+function moveSQuerrlSelection(direction: "up" | "down" | "left" | "right") {
+  if (!squerrlPickerOptionsEl) {
+    return;
+  }
+
+  const options = Array.from(squerrlPickerOptionsEl.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]"));
+  const columnCount = 4;
+  let targetIndex = squerrlSelectedIndex;
+
+  if (direction === "up") {
+    targetIndex -= columnCount;
+    if (targetIndex < 0) {
+      squerrlTableSearchEl?.focus();
+      return;
+    }
+  } else if (direction === "down") {
+    targetIndex = Math.min(squerrlSelectedIndex + columnCount, options.length - 1);
+  } else if (direction === "left") {
+    targetIndex = (squerrlSelectedIndex - 1 + options.length) % options.length;
+  } else if (direction === "right") {
+    targetIndex = (squerrlSelectedIndex + 1) % options.length;
+  }
+
+  focusSQuerrlSelection(targetIndex);
+}
+
+function selectActiveSQuerrlSuggestion() {
+  const option = squerrlPickerOptionsEl?.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]")[squerrlSelectedIndex];
+  if (!option) {
+    return;
+  }
+
+  selectSQuerrlSuggestion({
+    label: option.textContent?.trim() ?? "",
+    value: option.dataset.squerrlValue ?? "",
+  });
+}
+
+function commitSQuerrlFields() {
+  const context = getSQuerrlContext();
+  if (!sqlEditorEl || !context || !selectedSQuerrlFields.size) {
+    return;
+  }
+
+  sqlEditorEl.setRangeText(`${[...selectedSQuerrlFields].join(", ")} `, context.cursor, context.cursor, "end");
+  selectedSQuerrlFields.clear();
+  activeSQuerrlStage = "options";
+  hideSQuerrlPicker();
+  sqlEditorEl.focus();
+}
+
+function renderSQuerrlPicker(title: string, status: string, suggestions: SQuerrlSuggestion[], context: ReturnType<typeof getSQuerrlContext>, searchableTables?: SqlSchemaTable[], multiSelect = false, showSortControl = false) {
+  if (!squerrlPickerEl || !squerrlPickerTitleEl || !squerrlPickerStatusEl || !squerrlPickerOptionsEl || !context) {
+    return;
+  }
+
+  squerrlSelectedIndex = 0;
+  squerrlPickerEl.setAttribute("aria-label", `${title}. ${status}`);
+  squerrlPickerEl.innerHTML = `${showSortControl ? '<label class="squerrl-picker__sort" for="squerrl-sort-order"><span>Sort</span><select id="squerrl-sort-order" aria-label="Optional SQuerL sort order"><option value="">NO SORT</option><option value="~up ">~up</option><option value="~down ">~down</option></select></label>' : ""}<input id="squerrl-table-search" class="squerrl-picker__search" type="search" placeholder="Filter SQL prefixes or tables" autocomplete="off" aria-label="Filter SQL prefixes or tables" /><div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerrl</span><h3 id="squerrl-picker-title"></h3></div><span id="squerrl-picker-status" class="squerrl-picker__status"></span></div><div id="squerrl-picker-options" class="squerrl-picker__options"></div>`;
+  const pickerTitleEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-title");
+  const pickerStatusEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-status");
+  const pickerOptionsEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-options");
+  if (!pickerTitleEl || !pickerStatusEl || !pickerOptionsEl) {
+    return;
+  }
+  squerrlPickerTitleEl = pickerTitleEl;
+  squerrlPickerStatusEl = pickerStatusEl;
+  squerrlPickerOptionsEl = pickerOptionsEl;
+  squerrlTableSearchEl = squerrlPickerEl.querySelector("#squerrl-table-search");
+  pickerTitleEl.textContent = title;
+  pickerStatusEl.textContent = status;
+  constrainSQuerrlPickerFocus(() => {
+    selectedSQuerrlFields.clear();
+    hideSQuerrlPicker();
+    sqlEditorEl?.focus();
+  });
+  pickerOptionsEl.setAttribute("aria-label", multiSelect ? "Field choices. Use Space to mark fields, Enter to use marked fields, or Escape to cancel." : "Suggestions. Use arrow keys to navigate, Enter to select, or Escape to cancel.");
+
+  const sortOrderEl = squerrlPickerEl.querySelector<HTMLSelectElement>("#squerrl-sort-order");
+  sortOrderEl?.addEventListener("change", () => {
+    if (!sortOrderEl.value || !sqlEditorEl) {
+      return;
+    }
+    const cursor = sqlEditorEl.selectionStart;
+    sqlEditorEl.setRangeText(sortOrderEl.value, cursor, cursor, "end");
+    sortOrderEl.value = "";
+    sqlEditorEl.focus();
+  });
+
+  const renderOptions = (items: SQuerrlSuggestion[]) => {
+    squerrlPickerOptionsEl!.innerHTML = items.length
+      ? items
+          .map(
+            (suggestion) => `<button type="button" class="squerrl-picker__option${multiSelect && selectedSQuerrlFields.has(suggestion.value.trim()) ? " is-marked" : ""}" data-squerrl-value="${escapeHtml(suggestion.value)}"${multiSelect ? ` aria-pressed="${selectedSQuerrlFields.has(suggestion.value.trim())}"` : ""}>
+              <span>${escapeHtml(suggestion.label)}</span>
+              ${suggestion.detail ? `<small>${escapeHtml(suggestion.detail)}</small>` : ""}
+            </button>`
+          )
+          .join("")
+      : '<p class="squerrl-picker__empty">No matching schema items found.</p>';
+
+    squerrlPickerOptionsEl!.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (multiSelect) {
+          const value = button.dataset.squerrlValue?.trim() ?? "";
+          if (value === "*") {
+            selectedSQuerrlFields.clear();
+          }
+          if (selectedSQuerrlFields.has(value)) {
+            selectedSQuerrlFields.delete(value);
+          } else {
+            if (value !== "*") {
+              selectedSQuerrlFields.delete("*");
+            }
+            selectedSQuerrlFields.add(value);
+          }
+          const selectedIndex = squerrlSelectedIndex;
+          renderOptions(items);
+          focusSQuerrlSelection(selectedIndex);
+          return;
+        }
+        selectSQuerrlSuggestion({
+          label: button.textContent?.trim() ?? "",
+          value: button.dataset.squerrlValue ?? "",
+        });
+      });
+      button.addEventListener("keydown", (event) => {
+        const key = event.key.toLowerCase();
+        if (event.key === "ArrowDown" || key === "s") {
+          event.preventDefault();
+          moveSQuerrlSelection("down");
+        } else if (event.key === "ArrowUp" || key === "w") {
+          event.preventDefault();
+          moveSQuerrlSelection("up");
+        } else if (event.key === "ArrowLeft" || key === "a") {
+          event.preventDefault();
+          moveSQuerrlSelection("left");
+        } else if (event.key === "ArrowRight" || key === "d") {
+          event.preventDefault();
+          moveSQuerrlSelection("right");
+        } else if (event.key === " " && multiSelect) {
+          event.preventDefault();
+          button.click();
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          if (multiSelect) {
+            commitSQuerrlFields();
+          } else {
+            selectActiveSQuerrlSuggestion();
+          }
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          selectedSQuerrlFields.clear();
+          hideSQuerrlPicker();
+          sqlEditorEl?.focus();
+        }
+      });
+    });
+    setSQuerrlSelection(0);
+  };
+
+  const tableSuggestions = searchableTables?.map((table) => ({
+    label: table.name,
+    value: table.name,
+    detail: `${table.fields.length} field${table.fields.length === 1 ? "" : "s"}`,
+  })) ?? [];
+  const searchItems = [...suggestions, ...tableSuggestions];
+
+  if (squerrlTableSearchEl) {
+    squerrlTableSearchEl.addEventListener("input", () => {
+      const searchTerm = squerrlTableSearchEl!.value.toLowerCase();
+      renderOptions(
+        searchItems
+          .filter((item) => item.label.toLowerCase().includes(searchTerm))
+      );
+    });
+    squerrlTableSearchEl.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        focusSQuerrlSelection(0);
+      } else if (event.key === "Enter" && multiSelect) {
+        event.preventDefault();
+        commitSQuerrlFields();
+      } else if (event.key === "Enter" && squerrlSelectedIndex >= 0) {
+        event.preventDefault();
+        selectActiveSQuerrlSuggestion();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        selectedSQuerrlFields.clear();
+        hideSQuerrlPicker();
+        sqlEditorEl?.focus();
+      }
+    });
+  }
+
+  renderOptions(suggestions);
+  squerrlPickerEl.hidden = false;
+}
+
+async function maybeShowSQuerrlPicker(forceOpen = false) {
+  const context = getSQuerrlContext();
+  if (!context || (!context.trigger && !forceOpen)) {
+    hideSQuerrlPicker();
+    return;
+  }
+
+  const requestId = ++squerrlRequestId;
+  try {
+    const schemaKey = getActiveConnectionId() ?? "__internal_workspace__";
+    if (squerrlSchemaCacheKey !== schemaKey || !squerrlSchemaCache) {
+      squerrlSchemaCache = await invoke<SqlSchemaTable[]>("load_sql_schema", {
+        connectionId: getActiveConnectionId(),
+      });
+      squerrlSchemaCacheKey = schemaKey;
+    }
+    if (requestId !== squerrlRequestId) {
+      return;
+    }
+
+    const schema = squerrlSchemaCache;
+    const prefix = context.prefix.toLowerCase();
+    const tables = schema.filter((table) => table.name.toLowerCase().includes(prefix));
+    const selectedTableNames = new Set(
+      [...context.beforeCursor.matchAll(/\bfrom\s+([A-Za-z_][A-Za-z0-9$]*)/gi)].map((match) => match[1].toLowerCase())
+    );
+    const selectedTables = schema.filter((table) => selectedTableNames.has(table.name.toLowerCase()));
+
+    const languageLabel = context.language === "sql" ? "SQL" : "PythiaJS";
+
+    if (context.language === "pythia" && activeSQuerrlTableName && activeSQuerrlStage === "conditions") {
+      const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
+      if (selectedTable) {
+        renderSQuerrlConditionBuilder(selectedTable);
+        return;
+      }
+    }
+
+    if (context.language === "pythia" && activeSQuerrlTableName && activeSQuerrlStage === "fields") {
+      const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
+      const hasOnlySelectedTable = context.beforeCursor.trim().toLowerCase() === activeSQuerrlTableName.toLowerCase();
+      if (selectedTable && hasOnlySelectedTable) {
+        renderSQuerrlPicker(
+          "Choose fields",
+          `SQuerL · ${selectedTable.name} · Space marks fields, Enter uses them, Escape cancels`,
+          [
+            { label: "*", value: "* ", detail: "all fields" },
+            ...selectedTable.fields.map((field) => ({ label: field, value: field, detail: "field" })),
+          ],
+          context,
+          undefined,
+          true
+        );
+        return;
+      }
+    }
+
+    if (context.fromMatch) {
+      renderSQuerrlPicker(
+        "Choose a table",
+        `${languageLabel} · search ${schema.length} tables in the active database`,
+        tables.map((table) => ({ label: table.name, value: table.name, detail: `${table.fields.length} field${table.fields.length === 1 ? "" : "s"}` })),
+        context,
+        schema
+      );
+      return;
+    }
+
+    if (!context.hasFrom) {
+      const keywords = QUERY_KEYWORDS[context.language].filter((suggestion) => suggestion.label.toLowerCase().startsWith(prefix));
+      const matchingTables = tables.map((table) => ({
+        label: table.name,
+        value: table.name,
+        detail: `${table.fields.length} field${table.fields.length === 1 ? "" : "s"}`,
+      }));
+      renderSQuerrlPicker(
+        `Start a ${languageLabel} query`,
+        `${languageLabel} · SQL prefixes and ${schema.length} database tables`,
+        [...keywords, ...matchingTables],
+        context,
+        schema
+      );
+      return;
+    }
+
+    if (context.hasClause) {
+      const fields = selectedTables.flatMap((table) => table.fields).filter((field) => field.toLowerCase().startsWith(prefix));
+      const clauses: SQuerrlSuggestion[] = context.beforeCursor.trimEnd().toLowerCase().endsWith("where") || /\bwhere\s+$/i.test(context.beforeCursor)
+        ? fields.map((field) => ({ label: field, value: field, detail: "filter field" }))
+        : [
+            { label: "WHERE", value: "WHERE ", detail: "filter rows" },
+            { label: "ORDER BY", value: "ORDER BY ", detail: "sort rows" },
+            ...fields.map((field) => ({ label: field, value: field, detail: "sort/filter field" })),
+          ].filter((suggestion) => suggestion.label.toLowerCase().startsWith(prefix));
+      renderSQuerrlPicker("Shape the query", `${languageLabel} · sort or filter with active fields`, clauses, context);
+      return;
+    }
+
+    const fields = selectedTables.flatMap((table) => table.fields).filter((field) => field.toLowerCase().startsWith(prefix));
+    renderSQuerrlPicker("Choose a field", `${languageLabel} · fields from the selected table`, fields.map((field) => ({ label: field, value: field, detail: "field" })), context);
+  } catch (error) {
+    if (requestId !== squerrlRequestId) {
+      return;
+    }
+    hideSQuerrlPicker();
+    setLauncherMessage(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
 function populatePresetForm(preset: ConnectionPreset | null) {
   if (
     !presetIdEl ||
@@ -801,10 +1380,17 @@ window.addEventListener("DOMContentLoaded", () => {
   useInternalDbButtonEl = document.querySelector("#use-internal-db-button");
   sqlEditorFormEl = document.querySelector("#sql-editor-form");
   sqlEditorEl = document.querySelector("#sql-editor");
+  queryLanguageEl = document.querySelector("#query-language");
   savedQueryDropdownEl = document.querySelector("#saved-query-dropdown");
   querySearchButtonEl = document.querySelector("#query-search-button");
   runSqlButtonEl = document.querySelector("#run-sql-button");
   clearSqlButtonEl = document.querySelector("#clear-sql-button");
+  squerrlPickerEl = document.querySelector("#squerrl-picker");
+  squerrlPickerTitleEl = document.querySelector("#squerrl-picker-title");
+  squerrlPickerStatusEl = document.querySelector("#squerrl-picker-status");
+  squerrlPickerOptionsEl = document.querySelector("#squerrl-picker-options");
+  squerrlTableSearchEl = document.querySelector("#squerrl-table-search");
+  squerrlSortOverlayEl = document.querySelector("#squerrl-sort-overlay");
   sqlResultsStatusEl = document.querySelector("#sql-results-status");
   sqlResultsOutputEl = document.querySelector("#sql-results-output");
   querySearchModalEl = document.querySelector("#query-search-modal");
@@ -882,6 +1468,90 @@ window.addEventListener("DOMContentLoaded", () => {
     void runSql(event);
   });
 
+  sqlEditorEl?.addEventListener("input", () => {
+    if (!sqlEditorEl!.value.trim()) {
+      activeQueryLanguage = null;
+      activeSQuerrlTableName = null;
+      activeSQuerrlStage = null;
+      selectedSQuerrlFields.clear();
+    }
+    hideSQuerrlPicker();
+  });
+
+  queryLanguageEl?.addEventListener("change", () => {
+    activeQueryLanguage = queryLanguageEl!.value as QueryLanguage;
+    activeSQuerrlTableName = null;
+    activeSQuerrlStage = null;
+    selectedSQuerrlFields.clear();
+    hideSQuerrlPicker();
+    void maybeShowSQuerrlPicker();
+    setLauncherMessage(`${queryLanguageEl!.options[queryLanguageEl!.selectedIndex].text} authoring selected.`);
+  });
+
+  sqlEditorEl?.addEventListener("click", () => {
+    void maybeShowSQuerrlPicker();
+  });
+
+  sqlEditorEl?.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" && activeQueryLanguage === "pythia" && activeSQuerrlStage === "options") {
+      event.preventDefault();
+      openSQuerrlSortOverlay();
+      return;
+    }
+
+    if (squerrlPickerEl?.hidden) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        void maybeShowSQuerrlPicker(true).then(() => {
+          focusSQuerrlSelection(0);
+        });
+      }
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusSQuerrlSelection(0);
+      return;
+    }
+
+    const options = squerrlPickerOptionsEl?.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]");
+    const selectedOption = options?.[squerrlSelectedIndex];
+    if (event.key === "ArrowDown" && options?.length) {
+      event.preventDefault();
+      setSQuerrlSelection(squerrlSelectedIndex + 1);
+    } else if (event.key === "ArrowUp" && options?.length) {
+      event.preventDefault();
+      setSQuerrlSelection(squerrlSelectedIndex - 1);
+    } else if ((event.key === "Enter" || event.key === "Tab" || event.key === "ArrowRight") && selectedOption) {
+      event.preventDefault();
+      selectActiveSQuerrlSuggestion();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      hideSQuerrlPicker();
+      sqlEditorEl?.focus();
+    }
+  });
+
+  squerrlSortOverlayEl?.addEventListener("change", () => {
+    if (squerrlSortOverlayEl!.value && sqlEditorEl) {
+      const cursor = sqlEditorEl.selectionStart;
+      sqlEditorEl.setRangeText(squerrlSortOverlayEl!.value, cursor, cursor, "end");
+    }
+    squerrlSortOverlayEl!.value = "";
+    squerrlSortOverlayEl!.hidden = true;
+    sqlEditorEl?.focus();
+  });
+
+  squerrlSortOverlayEl?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      squerrlSortOverlayEl!.value = "";
+      squerrlSortOverlayEl!.hidden = true;
+      sqlEditorEl?.focus();
+    }
+  });
+
   presetFormEl?.addEventListener("submit", (event) => {
     void savePreset(event);
   });
@@ -911,6 +1581,11 @@ window.addEventListener("DOMContentLoaded", () => {
       sqlEditorEl.value = "";
       sqlEditorEl.focus();
     }
+    activeQueryLanguage = null;
+    activeSQuerrlTableName = null;
+    activeSQuerrlStage = null;
+    selectedSQuerrlFields.clear();
+    hideSQuerrlPicker();
     renderSqlResults(null);
   });
 

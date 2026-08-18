@@ -113,11 +113,11 @@ body::after {
   z-index: 1;
   width: min(100%, 1240px);
   margin: 0 auto;
-  min-height: 100vh;
-  padding: 64px 24px 40px;
+  min-height: 50vh;
+  padding: 8px 3px 5px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 12px;
 }
 
 .top-horizontal-scrollbar {
@@ -171,7 +171,7 @@ body::after {
 }
 
 .app-shell__brand-block {
-  padding: 28px 32px;
+  padding: 7px 8px;
 }
 
 .app-shell__eyebrow,
@@ -472,6 +472,10 @@ body::after {
   /* Styled via Bootstrap form-select form-select-sm classes with rusty overrides */
 }
 
+.query-language {
+  min-width: 112px;
+}
+
 .query-search-button {
   /* Styled via Bootstrap btn btn-sm btn-outline-primary classes with rusty overrides */
 }
@@ -490,6 +494,162 @@ body::after {
 #sql-editor::placeholder {
   color: #5d2818;
   opacity: 1;
+}
+
+.sql-editor-form {
+  position: relative;
+}
+
+.squerrl-sort-overlay {
+  position: absolute;
+  top: 148px;
+  right: 14px;
+  z-index: 3;
+  min-width: 136px;
+  padding: 7px 9px;
+  border: 1px solid var(--accent-rust);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.98);
+  color: #201514;
+  font: inherit;
+  box-shadow: 0 8px 20px rgba(70, 34, 24, 0.18);
+}
+
+.squerrl-picker {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(177, 88, 61, 0.3);
+  border-radius: 12px;
+  background: rgba(255, 247, 244, 0.82);
+  box-shadow: 0 12px 28px rgba(70, 34, 24, 0.12);
+}
+
+.squerrl-picker__header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.squerrl-picker__eyebrow {
+  display: block;
+  color: var(--accent-rust);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.squerrl-picker h3 {
+  margin: 2px 0 0;
+  font-size: 1rem;
+}
+
+.squerrl-picker__status {
+  color: rgba(50, 27, 23, 0.62);
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+.squerrl-picker__sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(50, 27, 23, 0.74);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.squerrl-picker__sort select {
+  padding: 6px 8px;
+  border: 1px solid rgba(177, 88, 61, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.72);
+  color: #201514;
+  font: inherit;
+}
+
+.squerrl-condition-builder {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.squerrl-condition-builder select,
+.squerrl-condition-builder input,
+.squerrl-condition-builder button {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(177, 88, 61, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.72);
+  color: #201514;
+  font: inherit;
+}
+
+.squerrl-condition-builder button {
+  font-weight: 600;
+}
+
+.squerrl-picker__options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 284px;
+  overflow-y: auto;
+}
+
+.squerrl-picker__search {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(177, 88, 61, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.72);
+  color: #201514;
+  font: inherit;
+}
+
+.squerrl-picker__search:focus {
+  outline: 2px solid var(--accent-rust);
+  outline-offset: 2px;
+}
+
+.squerrl-picker__option {
+  display: flex;
+  min-height: 52px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid rgba(177, 88, 61, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.64);
+  color: #321b17;
+  text-align: left;
+}
+
+.squerrl-picker__option:hover,
+.squerrl-picker__option:focus-visible,
+.squerrl-picker__option.is-selected {
+  border-color: var(--accent-rust);
+  background: rgba(177, 88, 61, 0.1);
+}
+
+.squerrl-picker__option.is-marked {
+  border-color: var(--accent-rust-deep);
+  background: rgba(177, 88, 61, 0.2);
+}
+
+.squerrl-picker__option small {
+  color: rgba(50, 27, 23, 0.58);
+  font-size: 0.74rem;
+}
+
+.squerrl-picker__empty {
+  margin: 0;
+  color: rgba(50, 27, 23, 0.66);
 }
 
 .sql-results-card {
