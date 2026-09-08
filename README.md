@@ -2,6 +2,8 @@
 
 Rusty Pythia is the next-generation desktop rebuild of Pythia, targeting a Tauri + Rust shell with a reliable browser fallback path.
 
+PythiaJS was the prototype and predecessor of Rusty Pythia. It is not a query language; the query workspace supports SQuerL and SQL.
+
 ## Repository Layout
 
 - Root workspace is reserved for the Rusty Pythia implementation.
@@ -14,7 +16,13 @@ Rusty Pythia is the next-generation desktop rebuild of Pythia, targeting a Tauri
 
 ## Query Languages
 
-Rusty Pythia supports SQL and SQuerL in the query workspace.
+The query mode selector offers three choices:
+
+- **SQuerL** provides schema-aware table, field, sort, and condition assistance.
+- **SQL Assist** provides SQL keyword and table suggestions.
+- **Non Assist** is a free-form query box with no suggestions or picker behavior.
+
+All three modes execute the resulting statement as SQL against the selected database.
 
 ### SQuerL
 

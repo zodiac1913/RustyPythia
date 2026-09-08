@@ -480,6 +480,10 @@ body::after {
   /* Styled via Bootstrap btn btn-sm btn-outline-primary classes with rusty overrides */
 }
 
+#app-log-button {
+  white-space: nowrap;
+}
+
 .sql-editor-form__actions {
   display: flex;
   align-items: center;
@@ -570,9 +574,29 @@ body::after {
   font: inherit;
 }
 
+.squerrl-picker__table-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(50, 27, 23, 0.74);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.squerrl-picker__table-filter select {
+  min-width: 220px;
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid rgba(177, 88, 61, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.72);
+  color: #201514;
+  font: inherit;
+}
+
 .squerrl-condition-builder {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -590,6 +614,13 @@ body::after {
 
 .squerrl-condition-builder button {
   font-weight: 600;
+}
+
+.squerrl-condition-builder button:focus-visible,
+.squerrl-condition-builder input:focus-visible {
+  outline: 3px solid var(--accent-rust-deep);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px rgba(255, 247, 244, 0.95);
 }
 
 .squerrl-picker__options {
@@ -958,6 +989,26 @@ button:focus-visible {
   flex-direction: column;
 }
 
+.app-log-modal {
+  width: min(1100px, calc(100vw - 32px));
+  max-width: 1100px;
+  padding: 0;
+  border: 1px solid rgba(177, 88, 61, 0.2);
+  border-radius: 22px;
+  background: rgba(255, 248, 245, 0.98);
+  color: #201514;
+  box-shadow: 0 24px 60px rgba(74, 34, 25, 0.22);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-log-modal::backdrop {
+  background: rgba(32, 21, 20, 0.38);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
 .query-search-modal::backdrop {
   background: rgba(32, 21, 20, 0.38);
   -webkit-backdrop-filter: blur(6px);
@@ -965,6 +1016,15 @@ button:focus-visible {
 }
 
 .query-search-form {
+  padding: 24px;
+  margin: 0;
+  display: grid;
+  gap: 16px;
+  height: 100%;
+  overflow: auto;
+}
+
+.app-log-form {
   padding: 24px;
   margin: 0;
   display: grid;
@@ -1014,6 +1074,16 @@ button:focus-visible {
   font-size: 0.9rem;
 }
 
+.app-log-form select,
+.app-log-form input {
+  padding: 8px 10px;
+  border: 1px solid rgba(177, 88, 61, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 250, 248, 0.72);
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
 .query-search-form__row input:hover {
   border-color: rgba(177, 88, 61, 0.42);
   background: rgba(255, 250, 248, 0.88);
@@ -1033,6 +1103,17 @@ button:focus-visible {
   overflow-y: auto;
   display: grid;
   gap: 8px;
+}
+
+.app-log-results {
+  border: 1px solid rgba(177, 88, 61, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 247, 244, 0.4);
+  padding: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
 }
 
 .query-search-results__empty {
@@ -1076,6 +1157,48 @@ button:focus-visible {
   color: rgba(50, 27, 23, 0.6);
   margin-top: 4px;
   margin-bottom: 0;
+}
+
+.app-log-entry {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(177, 88, 61, 0.15);
+  border-radius: 10px;
+  background: rgba(255, 250, 248, 0.58);
+}
+
+.app-log-entry__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.app-log-entry__kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(177, 88, 61, 0.14);
+  color: #7f321c;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-log-entry__timestamp {
+  font-size: 0.76rem;
+  color: rgba(50, 27, 23, 0.64);
+}
+
+.app-log-entry__message {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #201514;
+  word-break: break-word;
 }
 
 .query-search-form__actions {
@@ -1156,6 +1279,10 @@ button:focus-visible {
 
   .preset-form__row {
     grid-template-columns: 1fr;
+  }
+
+  .squerrl-condition-builder {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

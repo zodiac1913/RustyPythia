@@ -54,9 +54,19 @@ struct WorkspaceDatabaseInfo {
 struct SqlMemoryEntry {
     connection_id: String,
     statement: String,
+    squerrl_statement: Option<String>,
     first_seen_at: String,
     last_seen_at: String,
     execution_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppLogEntry {
+    id: i64,
+    kind: String,
+    message: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -322,6 +332,7 @@ fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, S
             CREATE TABLE IF NOT EXISTS sql_statement_memory (
                 connection_id TEXT NOT NULL,
                 statement TEXT NOT NULL,
+                squerrl_statement TEXT,
                 first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 execution_count INTEGER NOT NULL DEFAULT 1,
@@ -337,6 +348,23 @@ fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, S
                 err
             )
         })?;
+
+    let has_squerrl_statement_column = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sql_statement_memory') WHERE name = 'squerrl_statement')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|err| format!("Failed to inspect SQL memory schema: {}", err))?;
+
+    if has_squerrl_statement_column == 0 {
+        connection
+            .execute(
+                "ALTER TABLE sql_statement_memory ADD COLUMN squerrl_statement TEXT",
+                [],
+            )
+            .map_err(|err| format!("Failed to add SQuerL audit column: {}", err))?;
+    }
 
     let bootstrap_store = PresetStore::default();
     sync_workspace_connection_catalog(&connection, &bootstrap_store)?;
@@ -387,6 +415,49 @@ fn open_workspace_database(app: &AppHandle) -> Result<SqliteConnection, String> 
             err
         )
     })
+}
+
+fn insert_app_log(connection: &SqliteConnection, kind: &str, message: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO app_log (kind, message)
+            VALUES (?1, ?2)
+            ",
+            (kind.trim(), message.trim()),
+        )
+        .map(|_| ())
+        .map_err(|err| format!("Failed to write app log: {}", err))
+}
+
+fn write_app_log(app: &AppHandle, kind: &str, message: &str) {
+    if kind.trim().is_empty() || message.trim().is_empty() {
+        return;
+    }
+
+    match open_workspace_database(app) {
+        Ok(connection) => {
+            if let Err(err) = insert_app_log(&connection, kind, message) {
+                eprintln!("{}", err);
+            }
+        }
+        Err(err) => eprintln!("Failed to open workspace database for app log: {}", err),
+    }
+}
+
+fn summarize_for_log(message: &str) -> String {
+    const MAX_LOG_CHARS: usize = 240;
+
+    let condensed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if condensed.chars().count() <= MAX_LOG_CHARS {
+        return condensed;
+    }
+
+    let prefix = condensed
+        .chars()
+        .take(MAX_LOG_CHARS.saturating_sub(1))
+        .collect::<String>();
+    format!("{}…", prefix)
 }
 
 fn normalize_connection_id(connection_id: Option<&str>) -> &str {
@@ -473,11 +544,18 @@ fn record_sql_memory(
     app: AppHandle,
     connection_id: Option<String>,
     statement: String,
+    squerrl_statement: Option<String>,
 ) -> Result<(), String> {
     let normalized_statement = statement.trim();
     if normalized_statement.is_empty() {
         return Err("SQL statement cannot be empty.".into());
     }
+
+    let normalized_squerrl_statement = squerrl_statement
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
     let connection = open_workspace_database(&app)?;
@@ -489,20 +567,79 @@ fn record_sql_memory(
             INSERT INTO sql_statement_memory (
                 connection_id,
                 statement,
+                squerrl_statement,
                 first_seen_at,
                 last_seen_at,
                 execution_count
             )
-            VALUES (?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+            VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
             ON CONFLICT(connection_id, statement) DO UPDATE SET
                 last_seen_at = CURRENT_TIMESTAMP,
-                execution_count = sql_statement_memory.execution_count + 1
+                execution_count = sql_statement_memory.execution_count + 1,
+                squerrl_statement = CASE
+                    WHEN excluded.squerrl_statement IS NOT NULL AND TRIM(excluded.squerrl_statement) <> '' THEN excluded.squerrl_statement
+                    ELSE sql_statement_memory.squerrl_statement
+                END
             ",
-            (connection_id.as_str(), normalized_statement),
+            (
+                connection_id.as_str(),
+                normalized_statement,
+                normalized_squerrl_statement.as_deref(),
+            ),
         )
         .map_err(|err| format!("Failed to record scoped SQL memory: {}", err))?;
 
+    write_app_log(
+        &app,
+        "sql.memory",
+        &format!(
+            "Recorded SQL memory for {}: {}{}",
+            connection_id,
+            summarize_for_log(normalized_statement),
+            normalized_squerrl_statement
+                .as_deref()
+                .map(|squerrl| format!(" (SQuerL: {})", summarize_for_log(squerrl)))
+                .unwrap_or_default()
+        ),
+    );
+
     Ok(())
+}
+
+#[tauri::command]
+fn has_sql_memory_statement(
+    app: AppHandle,
+    connection_id: Option<String>,
+    statement: String,
+) -> Result<bool, String> {
+    let normalized_statement = statement.trim();
+    if normalized_statement.is_empty() {
+        return Ok(false);
+    }
+
+    let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
+    let connection = open_workspace_database(&app)?;
+    ensure_connection_exists(&connection, &connection_id)?;
+
+    let mut exists_statement = connection
+        .prepare(
+            "
+            SELECT 1
+            FROM sql_statement_memory
+            WHERE connection_id = ?1
+              AND statement = ?2
+            LIMIT 1
+            ",
+        )
+        .map_err(|err| format!("Failed to prepare SQL memory lookup: {}", err))?;
+
+    let mut rows = exists_statement
+        .query((connection_id.as_str(), normalized_statement))
+        .map_err(|err| format!("Failed to check SQL memory: {}", err))?;
+
+    rows.next()
+        .map(|row| row.is_some())
+        .map_err(|err| format!("Failed to read SQL memory lookup result: {}", err))
 }
 
 #[tauri::command]
@@ -522,6 +659,7 @@ fn load_sql_memory(
             SELECT
                 connection_id,
                 statement,
+                squerrl_statement,
                 first_seen_at,
                 last_seen_at,
                 execution_count
@@ -538,9 +676,10 @@ fn load_sql_memory(
             Ok(SqlMemoryEntry {
                 connection_id: row.get(0)?,
                 statement: row.get(1)?,
-                first_seen_at: row.get(2)?,
-                last_seen_at: row.get(3)?,
-                execution_count: row.get(4)?,
+                squerrl_statement: row.get(2)?,
+                first_seen_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+                execution_count: row.get(5)?,
             })
         })
         .map_err(|err| format!("Failed to load SQL memory: {}", err))?;
@@ -561,80 +700,106 @@ fn execute_sql_query(
     }
 
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
-    let (target_path, connection_label) = resolve_sqlite_query_target(&app, &connection_id)?;
-    let connection = SqliteConnection::open(&target_path).map_err(|err| {
-        format!(
-            "Failed to open SQLite target {} at {}: {}",
-            connection_label,
-            target_path.display(),
-            err
-        )
-    })?;
+    let execution_result = (|| -> Result<SqlQueryResult, String> {
+        let (target_path, connection_label) = resolve_sqlite_query_target(&app, &connection_id)?;
+        let connection = SqliteConnection::open(&target_path).map_err(|err| {
+            format!(
+                "Failed to open SQLite target {} at {}: {}",
+                connection_label,
+                target_path.display(),
+                err
+            )
+        })?;
 
-    let query_prefix = normalized_sql
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let is_row_query = matches!(
-        query_prefix.as_str(),
-        "select" | "with" | "pragma" | "explain"
-    );
+        let query_prefix = normalized_sql
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_row_query = matches!(
+            query_prefix.as_str(),
+            "select" | "with" | "pragma" | "explain"
+        );
 
-    if is_row_query {
-        let mut statement = connection
-            .prepare(normalized_sql)
-            .map_err(|err| format!("Failed to prepare query: {}", err))?;
-        let column_count = statement.column_count();
-        let columns = statement
-            .column_names()
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect::<Vec<_>>();
-        let rows = statement
-            .query_map([], |row| {
-                let mut values = Vec::with_capacity(column_count);
-                for index in 0..column_count {
-                    values.push(sqlite_value_to_string(row.get_ref(index)?));
-                }
-                Ok(values)
-            })
-            .map_err(|err| format!("Failed to execute query: {}", err))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| format!("Failed to read query results: {}", err))?;
+        if is_row_query {
+            let mut statement = connection
+                .prepare(normalized_sql)
+                .map_err(|err| format!("Failed to prepare query: {}", err))?;
+            let column_count = statement.column_count();
+            let columns = statement
+                .column_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>();
+            let rows = statement
+                .query_map([], |row| {
+                    let mut values = Vec::with_capacity(column_count);
+                    for index in 0..column_count {
+                        values.push(sqlite_value_to_string(row.get_ref(index)?));
+                    }
+                    Ok(values)
+                })
+                .map_err(|err| format!("Failed to execute query: {}", err))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| format!("Failed to read query results: {}", err))?;
 
-        return Ok(SqlQueryResult {
-            connection_id,
+            return Ok(SqlQueryResult {
+                connection_id: connection_id.clone(),
+                connection_label: connection_label.clone(),
+                rows_affected: rows.len(),
+                message: format!(
+                    "Loaded {} row{} from {}.",
+                    rows.len(),
+                    if rows.len() == 1 { "" } else { "s" },
+                    connection_label
+                ),
+                columns,
+                rows,
+            });
+        }
+
+        let rows_affected = connection
+            .execute(normalized_sql, [])
+            .map_err(|err| format!("Failed to execute statement: {}", err))?;
+
+        Ok(SqlQueryResult {
+            connection_id: connection_id.clone(),
             connection_label: connection_label.clone(),
-            rows_affected: rows.len(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected,
             message: format!(
-                "Loaded {} row{} from {}.",
-                rows.len(),
-                if rows.len() == 1 { "" } else { "s" },
-                connection_label
+                "Executed statement against {}. {} row{} affected.",
+                connection_label,
+                rows_affected,
+                if rows_affected == 1 { "" } else { "s" }
             ),
-            columns,
-            rows,
-        });
+        })
+    })();
+
+    match &execution_result {
+        Ok(result) => write_app_log(
+            &app,
+            "sql.execute",
+            &format!(
+                "Executed SQL against {}: {}",
+                result.connection_label,
+                summarize_for_log(normalized_sql)
+            ),
+        ),
+        Err(err) => write_app_log(
+            &app,
+            "sql.error",
+            &format!(
+                "Failed SQL execution for {}: {} :: {}",
+                connection_id,
+                err,
+                summarize_for_log(normalized_sql)
+            ),
+        ),
     }
 
-    let rows_affected = connection
-        .execute(normalized_sql, [])
-        .map_err(|err| format!("Failed to execute statement: {}", err))?;
-
-    Ok(SqlQueryResult {
-        connection_id,
-        connection_label: connection_label.clone(),
-        columns: Vec::new(),
-        rows: Vec::new(),
-        rows_affected,
-        message: format!(
-            "Executed statement against {}. {} row{} affected.",
-            connection_label,
-            rows_affected,
-            if rows_affected == 1 { "" } else { "s" }
-        ),
-    })
+    execution_result
 }
 
 #[tauri::command]
@@ -689,12 +854,73 @@ fn load_sql_schema(
         });
     }
 
+    write_app_log(
+        &app,
+        "schema.load",
+        &format!(
+            "Loaded schema for {} with {} table(s)",
+            connection_id,
+            tables.len()
+        ),
+    );
+
     Ok(tables)
 }
 
 #[tauri::command]
+fn record_app_event(app: AppHandle, kind: String, message: String) -> Result<(), String> {
+    let normalized_kind = kind.trim();
+    let normalized_message = message.trim();
+
+    if normalized_kind.is_empty() {
+        return Err("App log kind cannot be empty.".into());
+    }
+
+    if normalized_message.is_empty() {
+        return Err("App log message cannot be empty.".into());
+    }
+
+    let connection = open_workspace_database(&app)?;
+    insert_app_log(&connection, normalized_kind, normalized_message)
+}
+
+#[tauri::command]
+fn load_app_log(app: AppHandle, limit: Option<u32>) -> Result<Vec<AppLogEntry>, String> {
+    let row_limit = i64::from(limit.unwrap_or(100).clamp(1, 500));
+    let connection = open_workspace_database(&app)?;
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT id, kind, message, created_at
+            FROM app_log
+            ORDER BY id DESC
+            LIMIT ?1
+            ",
+        )
+        .map_err(|err| format!("Failed to prepare app log query: {}", err))?;
+
+    let rows = statement
+        .query_map([row_limit], |row| {
+            Ok(AppLogEntry {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                message: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|err| format!("Failed to load app log rows: {}", err))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to read app log entries: {}", err))
+}
+
+#[tauri::command]
 fn load_workspace_database_info(app: AppHandle) -> Result<WorkspaceDatabaseInfo, String> {
-    ensure_workspace_database(&app)
+    let result = ensure_workspace_database(&app);
+    if let Ok(info) = &result {
+        write_app_log(&app, "workspace.info", &format!("Loaded workspace database info for {}", info.path));
+    }
+    result
 }
 
 #[tauri::command]
@@ -711,6 +937,7 @@ fn load_preset_store(app: AppHandle) -> Result<PresetStore, String> {
             )
         })?;
         sync_workspace_connection_catalog(&connection, &store)?;
+        write_app_log(&app, "preset.load", "Loaded empty preset store and synced internal connection catalog");
         return Ok(store);
     }
 
@@ -728,6 +955,12 @@ fn load_preset_store(app: AppHandle) -> Result<PresetStore, String> {
         )
     })?;
     sync_workspace_connection_catalog(&connection, &store)?;
+
+    write_app_log(
+        &app,
+        "preset.load",
+        &format!("Loaded preset store with {} preset(s)", store.presets.len()),
+    );
 
     Ok(store)
 }
@@ -748,7 +981,19 @@ fn save_preset_store(app: AppHandle, store: PresetStore) -> Result<(), String> {
             err
         )
     })?;
-    sync_workspace_connection_catalog(&connection, &store)
+    sync_workspace_connection_catalog(&connection, &store)?;
+
+    write_app_log(
+        &app,
+        "preset.save",
+        &format!(
+            "Saved preset store with {} preset(s); active preset is {}",
+            store.presets.len(),
+            store.active_preset_id.as_deref().unwrap_or("internal")
+        ),
+    );
+
+    Ok(())
 }
 
 async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTestResult, String> {
@@ -859,13 +1104,28 @@ fn test_sqlite_connection(preset: &ConnectionPreset) -> Result<ConnectionTestRes
 }
 
 #[tauri::command]
-async fn test_connection(preset: ConnectionPreset) -> Result<ConnectionTestResult, String> {
-    match preset.engine.as_str() {
+async fn test_connection(app: AppHandle, preset: ConnectionPreset) -> Result<ConnectionTestResult, String> {
+    let result = match preset.engine.as_str() {
         "mssql" => test_mssql_connection(&preset).await,
         "postgres" => test_postgres_connection(&preset),
         "sqlite" => test_sqlite_connection(&preset),
         other => Err(format!("Unsupported engine '{}'", other)),
+    };
+
+    match &result {
+        Ok(summary) => write_app_log(
+            &app,
+            "connection.test",
+            &format!("Connection test succeeded for {}: {}", preset.name, summary.summary),
+        ),
+        Err(err) => write_app_log(
+            &app,
+            "connection.error",
+            &format!("Connection test failed for {}: {}", preset.name, err),
+        ),
     }
+
+    result
 }
 
 fn build_sql_window(app: &AppHandle, target_url: &str) -> Result<(), String> {
@@ -915,7 +1175,12 @@ fn build_sql_window(app: &AppHandle, target_url: &str) -> Result<(), String> {
 
 #[tauri::command]
 fn open_sql_window(app: AppHandle, url: String) -> Result<(), String> {
-    build_sql_window(&app, &url)
+    let result = build_sql_window(&app, &url);
+    match &result {
+        Ok(_) => write_app_log(&app, "window.open", &format!("Opened SQL window for {}", url)),
+        Err(err) => write_app_log(&app, "window.error", &format!("Failed to open SQL window for {}: {}", url, err)),
+    }
+    result
 }
 
 fn build_internal_window(app: &tauri::App) -> Result<(), String> {
@@ -954,6 +1219,9 @@ pub fn run() {
             open_sql_window,
             execute_sql_query,
             load_sql_schema,
+            load_app_log,
+            record_app_event,
+            has_sql_memory_statement,
             record_sql_memory,
             load_sql_memory,
             load_workspace_database_info,
@@ -964,6 +1232,7 @@ pub fn run() {
         .setup(|app| {
             ensure_workspace_database(&app.handle())?;
             build_internal_window(app)?;
+            write_app_log(&app.handle(), "app.startup", "Rusty Pythia initialized its internal workspace and main window");
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -39,16 +39,18 @@
             <form class="sql-editor-form" id="sql-editor-form">
               <div class="sql-editor-form__label-row d-flex align-items-center gap-3">
                 <label for="sql-editor" class="form-label mb-0 flex-shrink-0">SQL query</label>
-                <span id="editor-mode-badge" class="editor-mode-badge" data-mode="pythiajs">PythiaJS authoring</span>
+                <span id="editor-mode-badge" class="editor-mode-badge" data-mode="squerrl">SQuerL authoring</span>
                 <div class="sql-editor-form__controls d-flex align-items-center gap-2 ms-auto flex-shrink-0">
-                  <select id="query-language" class="query-language form-select form-select-sm" aria-label="Query language" title="Choose the query authoring language">
-                    <option value="pythia">PythiaJS</option>
-                    <option value="sql">SQL</option>
+                  <select id="query-language" class="query-language form-select form-select-sm" aria-label="Query authoring mode" title="Choose the query authoring mode">
+                    <option value="squerrl">SQuerL</option>
+                    <option value="sql">SQL Assist</option>
+                    <option value="freeform">Non Assist</option>
                   </select>
                   <select id="saved-query-dropdown" class="saved-query-dropdown form-select form-select-sm" style="min-width: 200px" aria-label="Load saved query" title="Select a saved query to load">
                     <option value="">Load a saved query...</option>
                   </select>
                   <button type="button" id="query-search-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="Search saved queries" title="Search and filter saved queries by date">Query Search</button>
+                  <button type="button" id="app-log-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="View application log" title="View application log and audit events">App Log</button>
                 </div>
               </div>
               <textarea
@@ -73,7 +75,7 @@
                 <div id="squerrl-picker-options" class="squerrl-picker__options"></div>
               </section>
               <div class="sql-editor-form__actions">
-                <button type="submit" id="run-sql-button">Run SQL</button>
+                <button type="button" id="run-sql-button">Run SQL</button>
                 <button type="button" id="clear-sql-button">Clear</button>
                 <span class="launcher-actions__hint">Queries run directly against the current database target when supported.</span>
               </div>
@@ -270,6 +272,48 @@
         <div class="query-search-form__actions">
           <button type="button" id="load-query-from-search-button" class="query-search-form__button">Load Query to Workspace</button>
           <button type="button" id="clear-query-search-button" class="query-search-form__button">Clear Search</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="app-log-modal" class="app-log-modal" aria-labelledby="app-log-modal-title">
+      <form class="app-log-form" id="app-log-form" method="dialog">
+        <div class="query-search-modal__header">
+          <h2 id="app-log-modal-title">Application Log</h2>
+          <button type="button" class="footer-link" id="close-app-log-modal-button">Close</button>
+        </div>
+
+        <div class="query-search-form__row">
+          <div>
+            <label for="app-log-search-input">Search log text</label>
+            <input id="app-log-search-input" type="text" placeholder="kind, message, SQL, SQuerL..." />
+          </div>
+          <div>
+            <label for="app-log-kind-filter">Kind</label>
+            <select id="app-log-kind-filter">
+              <option value="">All kinds</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="query-search-form__row">
+          <div>
+            <label for="app-log-date-from">From date</label>
+            <input id="app-log-date-from" type="date" />
+          </div>
+          <div>
+            <label for="app-log-date-to">To date</label>
+            <input id="app-log-date-to" type="date" />
+          </div>
+        </div>
+
+        <div class="app-log-results" id="app-log-results">
+          <p class="query-search-results__empty">Open the log viewer to load recent audit events.</p>
+        </div>
+
+        <div class="query-search-form__actions">
+          <button type="button" id="refresh-app-log-button" class="query-search-form__button">Refresh</button>
+          <button type="button" id="clear-app-log-filters-button" class="query-search-form__button">Clear Filters</button>
         </div>
       </form>
     </dialog>

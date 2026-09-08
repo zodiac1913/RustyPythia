@@ -1,6 +1,38 @@
 import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import initSqlJs from "sql.js";
+import sqlWasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: {
+    invoke?: unknown;
+  };
+};
+
+type BrowserSqlQueryResult = {
+  columns: string[];
+  values: unknown[][];
+};
+
+type BrowserSqlStatement = {
+  bind(params?: unknown): void;
+  step(): boolean;
+  getAsObject(): Record<string, unknown>;
+  free(): void;
+};
+
+type BrowserSqlDatabase = {
+  run(sql: string, params?: unknown): void;
+  exec(sql: string, params?: unknown): BrowserSqlQueryResult[];
+  export(): Uint8Array;
+  getRowsModified(): number;
+  prepare(sql: string): BrowserSqlStatement;
+};
+
+type BrowserSqlModule = {
+  Database: new (data?: Uint8Array) => BrowserSqlDatabase;
+};
 
 let launcherUrlEl: HTMLInputElement | null;
 let launcherMsgEl: HTMLElement | null;
@@ -20,6 +52,7 @@ let sqlEditorEl: HTMLTextAreaElement | null;
 let queryLanguageEl: HTMLSelectElement | null;
 let savedQueryDropdownEl: HTMLSelectElement | null;
 let querySearchButtonEl: HTMLButtonElement | null;
+let appLogButtonEl: HTMLButtonElement | null;
 let runSqlButtonEl: HTMLButtonElement | null;
 let clearSqlButtonEl: HTMLButtonElement | null;
 let squerrlPickerEl: HTMLElement | null;
@@ -47,6 +80,15 @@ let querySearchResultsEl: HTMLElement | null;
 let loadQueryFromSearchButtonEl: HTMLButtonElement | null;
 let clearQuerySearchButtonEl: HTMLButtonElement | null;
 let closeQuerySearchModalButtonEl: HTMLButtonElement | null;
+let appLogModalEl: HTMLDialogElement | null;
+let appLogSearchInputEl: HTMLInputElement | null;
+let appLogKindFilterEl: HTMLSelectElement | null;
+let appLogDateFromEl: HTMLInputElement | null;
+let appLogDateToEl: HTMLInputElement | null;
+let appLogResultsEl: HTMLElement | null;
+let refreshAppLogButtonEl: HTMLButtonElement | null;
+let clearAppLogFiltersButtonEl: HTMLButtonElement | null;
+let closeAppLogModalButtonEl: HTMLButtonElement | null;
 let presetFormEl: HTMLFormElement | null;
 let presetIdEl: HTMLInputElement | null;
 let presetNameEl: HTMLInputElement | null;
@@ -98,6 +140,7 @@ type WorkspaceDatabaseInfo = {
 type SqlMemoryEntry = {
   connectionId: string;
   statement: string;
+  squerrlStatement: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   executionCount: number;
@@ -112,6 +155,13 @@ type SqlQueryResult = {
   message: string;
 };
 
+type AppLogEntry = {
+  id: number;
+  kind: string;
+  message: string;
+  createdAt: string;
+};
+
 type SqlSchemaTable = {
   name: string;
   fields: string[];
@@ -123,9 +173,20 @@ type SQuerrlSuggestion = {
   detail?: string;
 };
 
-type QueryLanguage = "pythia" | "sql";
+type SQuerrlPickerOptions = {
+  fieldScopeTables?: SqlSchemaTable[];
+  includeStarOption?: boolean;
+};
+
+type QueryLanguage = "squerrl" | "sql" | "freeform";
+
+type PreparedSqlExecution = {
+  statement: string;
+  squerrlStatement: string | null;
+};
 
 const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
+  freeform: [],
   sql: [
     { label: "SELECT", value: "SELECT ", detail: "choose fields" },
     { label: "INSERT", value: "INSERT ", detail: "add rows" },
@@ -139,7 +200,7 @@ const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
     { label: "REVOKE", value: "REVOKE ", detail: "remove permissions" },
     { label: "GRANT", value: "GRANT ", detail: "assign permissions" },
   ],
-  pythia: [
+  squerrl: [
     { label: "SELECT", value: "SELECT ", detail: "choose fields" },
     { label: "FROM", value: "FROM ", detail: "choose a table" },
     { label: "WHERE", value: "WHERE ", detail: "filter rows" },
@@ -147,12 +208,537 @@ const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
   ],
 };
 
+const SQL_PREFIX_PATTERN = /^\s*(select|with|insert|update|delete|drop|create|alter|pragma|explain)\b/i;
+const SQUERRL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9$]*$/;
+
+const INTERNAL_CONNECTION_ID = "__internal_workspace__";
 const PRESET_STORAGE_KEY = "rusty-pythia.connection-presets";
 const ACTIVE_PRESET_STORAGE_KEY = "rusty-pythia.active-preset";
+const BROWSER_WORKSPACE_DB_KEY = "rusty-pythia.browser-workspace.sqlite";
+const BROWSER_WORKSPACE_DB_PATH = "browser://rusty-pythia-workspace.sqlite";
 
 let connectionPresets: ConnectionPreset[] = [];
 let activePresetId: string | null = null;
 let workspaceDatabaseInfo: WorkspaceDatabaseInfo | null = null;
+let appLogEntriesCache: AppLogEntry[] = [];
+let browserSqlModulePromise: Promise<BrowserSqlModule> | null = null;
+let browserWorkspaceDbPromise: Promise<BrowserSqlDatabase> | null = null;
+
+function hasTauriBackend() {
+  return typeof (window as TauriWindow).__TAURI_INTERNALS__?.invoke === "function";
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return window.btoa(binary);
+}
+
+function base64ToBytes(value: string) {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+function sqliteValueToString(value: unknown) {
+  if (value === null) {
+    return "NULL";
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (value instanceof Uint8Array) {
+    return `<${value.byteLength} bytes>`;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return `<${value.byteLength} bytes>`;
+  }
+
+  return String(value);
+}
+
+function isSqlRowQuery(statement: string) {
+  const queryPrefix = statement.split(/\s+/);
+  const firstToken = queryPrefix[0]?.toLowerCase() ?? "";
+
+  return ["select", "with", "pragma", "explain"].includes(firstToken);
+}
+
+function browserTimestamp() {
+  return new Date().toISOString();
+}
+
+function persistBrowserWorkspaceDb(database: BrowserSqlDatabase) {
+  window.localStorage.setItem(BROWSER_WORKSPACE_DB_KEY, bytesToBase64(database.export()));
+}
+
+function getBrowserSqlRows(database: BrowserSqlDatabase, sql: string, params: unknown[] = []) {
+  const statement = database.prepare(sql);
+  statement.bind(params);
+  const rows: Record<string, unknown>[] = [];
+
+  while (statement.step()) {
+    rows.push(statement.getAsObject());
+  }
+
+  statement.free();
+  return rows;
+}
+
+function normalizeBrowserConnectionId(connectionId: string | null | undefined) {
+  return connectionId?.trim() ? connectionId : INTERNAL_CONNECTION_ID;
+}
+
+function browserConnectionLabel(connectionId: string) {
+  if (connectionId === INTERNAL_CONNECTION_ID) {
+    return "Internal workspace database";
+  }
+
+  return getPresetById(connectionId)?.name ?? connectionId;
+}
+
+function initializeBrowserWorkspaceDb(database: BrowserSqlDatabase) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS app_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS connection_catalog (
+      connection_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      is_internal INTEGER NOT NULL DEFAULT 0,
+      launch_url TEXT NOT NULL DEFAULT '',
+      host TEXT NOT NULL DEFAULT '',
+      port TEXT NOT NULL DEFAULT '',
+      database_name TEXT NOT NULL DEFAULT '',
+      username TEXT NOT NULL DEFAULT '',
+      auth_mode TEXT NOT NULL DEFAULT '',
+      domain TEXT NOT NULL DEFAULT '',
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS connection_secret (
+      connection_id TEXT PRIMARY KEY,
+      secret_blob BLOB,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS sql_statement_memory (
+      connection_id TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      squerrl_statement TEXT,
+      first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      execution_count INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(connection_id, statement)
+    );
+  `);
+}
+
+function syncBrowserConnectionCatalog(database: BrowserSqlDatabase, store: PresetStore) {
+  database.run(
+    `
+      INSERT INTO connection_catalog (
+        connection_id,
+        display_name,
+        engine,
+        is_internal,
+        is_default,
+        updated_at
+      )
+      VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(connection_id) DO UPDATE SET
+        display_name = excluded.display_name,
+        engine = excluded.engine,
+        is_internal = 1,
+        is_default = excluded.is_default,
+        updated_at = CURRENT_TIMESTAMP
+    `,
+    [
+      INTERNAL_CONNECTION_ID,
+      "Internal workspace database",
+      "sqlite",
+      store.activePresetId ? 0 : 1,
+    ]
+  );
+
+  store.presets.forEach((preset) => {
+    database.run(
+      `
+        INSERT INTO connection_catalog (
+          connection_id,
+          display_name,
+          engine,
+          is_internal,
+          launch_url,
+          host,
+          port,
+          database_name,
+          username,
+          auth_mode,
+          domain,
+          is_default,
+          updated_at
+        )
+        VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(connection_id) DO UPDATE SET
+          display_name = excluded.display_name,
+          engine = excluded.engine,
+          is_internal = 0,
+          launch_url = excluded.launch_url,
+          host = excluded.host,
+          port = excluded.port,
+          database_name = excluded.database_name,
+          username = excluded.username,
+          auth_mode = excluded.auth_mode,
+          domain = excluded.domain,
+          is_default = excluded.is_default,
+          updated_at = CURRENT_TIMESTAMP
+      `,
+      [
+        preset.id,
+        preset.name,
+        preset.engine,
+        preset.launchUrl,
+        preset.host,
+        preset.port,
+        preset.database,
+        preset.username,
+        preset.authMode,
+        preset.domain,
+        store.activePresetId === preset.id ? 1 : 0,
+      ]
+    );
+  });
+}
+
+async function getBrowserSqlModule() {
+  if (!browserSqlModulePromise) {
+    browserSqlModulePromise = initSqlJs({
+      locateFile: () => sqlWasmUrl,
+    }) as unknown as Promise<BrowserSqlModule>;
+  }
+
+  return browserSqlModulePromise;
+}
+
+async function getBrowserWorkspaceDb() {
+  if (!browserWorkspaceDbPromise) {
+    browserWorkspaceDbPromise = (async () => {
+      const sqlModule = await getBrowserSqlModule();
+      const encodedDb = window.localStorage.getItem(BROWSER_WORKSPACE_DB_KEY);
+      const database = new sqlModule.Database(encodedDb ? base64ToBytes(encodedDb) : undefined);
+
+      initializeBrowserWorkspaceDb(database);
+      syncBrowserConnectionCatalog(database, readLegacyPresetStore());
+      persistBrowserWorkspaceDb(database);
+
+      return database;
+    })();
+  }
+
+  return browserWorkspaceDbPromise;
+}
+
+async function browserWriteAppLog(kind: string, message: string) {
+  const database = await getBrowserWorkspaceDb();
+  database.run(
+    `
+      INSERT INTO app_log (kind, message, created_at)
+      VALUES (?, ?, ?)
+    `,
+    [kind.trim(), message.trim(), browserTimestamp()]
+  );
+  persistBrowserWorkspaceDb(database);
+}
+
+async function browserInvoke<T>(command: string, args?: Record<string, unknown>) {
+  switch (command) {
+    case "load_workspace_database_info": {
+      const info = {
+        path: BROWSER_WORKSPACE_DB_PATH,
+        summary: "Internal SQLite workspace is ready for logs, protected connection records, and connection-scoped SQL memory.",
+      } satisfies WorkspaceDatabaseInfo;
+      await browserWriteAppLog("workspace.info", `Loaded workspace database info for ${info.path}`);
+      return info as T;
+    }
+
+    case "load_preset_store": {
+      const store = readLegacyPresetStore();
+      const browserStore = {
+        activePresetId: null,
+        presets: store.presets,
+      } satisfies PresetStore;
+      const database = await getBrowserWorkspaceDb();
+      syncBrowserConnectionCatalog(database, browserStore);
+      persistBrowserWorkspaceDb(database);
+      return browserStore as T;
+    }
+
+    case "save_preset_store": {
+      const store = (args?.store ?? { activePresetId: null, presets: [] }) as PresetStore;
+      window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(store.presets));
+      if (store.activePresetId) {
+        window.localStorage.setItem(ACTIVE_PRESET_STORAGE_KEY, store.activePresetId);
+      } else {
+        window.localStorage.removeItem(ACTIVE_PRESET_STORAGE_KEY);
+      }
+      const database = await getBrowserWorkspaceDb();
+      syncBrowserConnectionCatalog(database, { ...store, activePresetId: null });
+      persistBrowserWorkspaceDb(database);
+      return undefined as T;
+    }
+
+    case "record_app_event": {
+      await browserWriteAppLog(String(args?.kind ?? ""), String(args?.message ?? ""));
+      return undefined as T;
+    }
+
+    case "load_app_log": {
+      const database = await getBrowserWorkspaceDb();
+      const rowLimit = Math.max(1, Math.min(Number(args?.limit ?? 100), 500));
+      const entries = getBrowserSqlRows(
+        database,
+        `
+          SELECT id, kind, message, created_at
+          FROM app_log
+          ORDER BY id DESC
+          LIMIT ?
+        `,
+        [rowLimit]
+      ).map((row) => ({
+        id: Number(row.id ?? 0),
+        kind: String(row.kind ?? ""),
+        message: String(row.message ?? ""),
+        createdAt: String(row.created_at ?? ""),
+      } satisfies AppLogEntry));
+      return entries as T;
+    }
+
+    case "load_sql_memory": {
+      const database = await getBrowserWorkspaceDb();
+      const connectionId = normalizeBrowserConnectionId(args?.connectionId as string | null | undefined);
+      const rowLimit = Math.max(1, Math.min(Number(args?.limit ?? 25), 250));
+      const entries = getBrowserSqlRows(
+        database,
+        `
+          SELECT connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count
+          FROM sql_statement_memory
+          WHERE connection_id = ?
+          ORDER BY last_seen_at DESC, statement COLLATE NOCASE ASC
+          LIMIT ?
+        `,
+        [connectionId, rowLimit]
+      ).map((row) => ({
+        connectionId: String(row.connection_id ?? ""),
+        statement: String(row.statement ?? ""),
+        squerrlStatement: row.squerrl_statement == null ? null : String(row.squerrl_statement),
+        firstSeenAt: String(row.first_seen_at ?? ""),
+        lastSeenAt: String(row.last_seen_at ?? ""),
+        executionCount: Number(row.execution_count ?? 0),
+      } satisfies SqlMemoryEntry));
+      return entries as T;
+    }
+
+    case "has_sql_memory_statement": {
+      const database = await getBrowserWorkspaceDb();
+      const connectionId = normalizeBrowserConnectionId(args?.connectionId as string | null | undefined);
+      const statement = String(args?.statement ?? "").trim();
+
+      if (!statement) {
+        return false as T;
+      }
+
+      const existingRow = getBrowserSqlRows(
+        database,
+        `
+          SELECT 1
+          FROM sql_statement_memory
+          WHERE connection_id = ?
+            AND statement = ?
+          LIMIT 1
+        `,
+        [connectionId, statement]
+      )[0];
+
+      return Boolean(existingRow) as T;
+    }
+
+    case "record_sql_memory": {
+      const database = await getBrowserWorkspaceDb();
+      const connectionId = normalizeBrowserConnectionId(args?.connectionId as string | null | undefined);
+      const statement = String(args?.statement ?? "").trim();
+      const squerrlStatement = String(args?.squerrlStatement ?? "").trim();
+
+      if (!statement) {
+        throw new Error("SQL statement cannot be empty.");
+      }
+
+      database.run(
+        `
+          INSERT INTO sql_statement_memory (
+            connection_id,
+            statement,
+            squerrl_statement,
+            first_seen_at,
+            last_seen_at,
+            execution_count
+          )
+          VALUES (?, ?, ?, ?, ?, 1)
+          ON CONFLICT(connection_id, statement) DO UPDATE SET
+            last_seen_at = excluded.last_seen_at,
+            execution_count = sql_statement_memory.execution_count + 1,
+            squerrl_statement = CASE
+              WHEN excluded.squerrl_statement IS NOT NULL AND TRIM(excluded.squerrl_statement) <> '' THEN excluded.squerrl_statement
+              ELSE sql_statement_memory.squerrl_statement
+            END
+        `,
+        [
+          connectionId,
+          statement,
+          squerrlStatement || null,
+          browserTimestamp(),
+          browserTimestamp(),
+        ]
+      );
+      persistBrowserWorkspaceDb(database);
+      await browserWriteAppLog(
+        "sql.memory",
+        `Recorded SQL memory for ${connectionId}: ${statement}${squerrlStatement ? ` (SQuerL: ${squerrlStatement})` : ""}`
+      );
+      return undefined as T;
+    }
+
+    case "execute_sql_query": {
+      const database = await getBrowserWorkspaceDb();
+      const connectionId = normalizeBrowserConnectionId(args?.connectionId as string | null | undefined);
+      const sql = String(args?.sql ?? "").trim();
+
+      if (!sql) {
+        throw new Error("SQL query cannot be empty.");
+      }
+
+      if (connectionId !== INTERNAL_CONNECTION_ID) {
+        throw new Error("Browser fallback currently runs SQL against the internal workspace database only.");
+      }
+
+      try {
+        if (isSqlRowQuery(sql)) {
+          const result = database.exec(sql)[0] ?? { columns: [], values: [] };
+          const queryResult = {
+            connectionId,
+            connectionLabel: browserConnectionLabel(connectionId),
+            columns: result.columns,
+            rows: result.values.map((row) => row.map((value) => sqliteValueToString(value))),
+            rowsAffected: result.values.length,
+            message: `Loaded ${result.values.length} row${result.values.length === 1 ? "" : "s"} from ${browserConnectionLabel(connectionId)}.`,
+          } satisfies SqlQueryResult;
+          await browserWriteAppLog("sql.execute", `Executed SQL against ${queryResult.connectionLabel}: ${sql}`);
+          return queryResult as T;
+        }
+
+        database.run(sql);
+        const rowsAffected = database.getRowsModified();
+        persistBrowserWorkspaceDb(database);
+        const queryResult = {
+          connectionId,
+          connectionLabel: browserConnectionLabel(connectionId),
+          columns: [],
+          rows: [],
+          rowsAffected,
+          message: `Executed statement against ${browserConnectionLabel(connectionId)}. ${rowsAffected} row${rowsAffected === 1 ? "" : "s"} affected.`,
+        } satisfies SqlQueryResult;
+        await browserWriteAppLog("sql.execute", `Executed SQL against ${queryResult.connectionLabel}: ${sql}`);
+        return queryResult as T;
+      } catch (error) {
+        await browserWriteAppLog(
+          "sql.error",
+          `Failed SQL execution for ${connectionId}: ${error instanceof Error ? error.message : String(error)} :: ${sql}`
+        );
+        throw error;
+      }
+    }
+
+    case "load_sql_schema": {
+      const database = await getBrowserWorkspaceDb();
+      const connectionId = normalizeBrowserConnectionId(args?.connectionId as string | null | undefined);
+
+      if (connectionId !== INTERNAL_CONNECTION_ID) {
+        throw new Error("Browser fallback currently loads schema from the internal workspace database only.");
+      }
+
+      const tables = getBrowserSqlRows(
+        database,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name COLLATE NOCASE"
+      ).map((row) => String(row.name ?? ""));
+
+      const schema = tables.map((tableName) => ({
+        name: tableName,
+        fields: getBrowserSqlRows(database, `PRAGMA table_info(${quoteSqlIdentifier(tableName)})`).map((row) => String(row.name ?? "")),
+      } satisfies SqlSchemaTable));
+
+      await browserWriteAppLog("schema.load", `Loaded schema for ${connectionId} with ${schema.length} table(s)`);
+      return schema as T;
+    }
+
+    case "test_connection": {
+      throw new Error("Browser fallback currently supports the internal workspace database only. External connection testing requires the Tauri desktop runtime.");
+    }
+
+    case "open_sql_window": {
+      const targetUrl = String(args?.url ?? "");
+      const openedWindow = window.open(targetUrl, "_blank", "noopener,noreferrer");
+
+      if (!openedWindow) {
+        throw new Error("The browser blocked the popup window. Allow popups for this preview to open the SQL app.");
+      }
+
+      return undefined as T;
+    }
+
+    default:
+      throw new Error(`Command '${command}' is not available in browser fallback mode.`);
+  }
+}
+
+async function invokeBackend<T>(command: string, args?: Record<string, unknown>) {
+  if (!hasTauriBackend()) {
+    return browserInvoke<T>(command, args);
+  }
+
+  return invoke<T>(command, args);
+}
+
+function applyRuntimeAvailabilityState() {
+  if (hasTauriBackend()) {
+    return;
+  }
+
+  databaseSelectorEl?.toggleAttribute("disabled", true);
+  toggleFavoriteDatabaseEl?.toggleAttribute("disabled", true);
+  testPresetButtonEl?.toggleAttribute("disabled", true);
+  setLauncherMessage("Browser fallback is active. SQL runs against the internal workspace database in this preview.");
+}
 
 function getActiveConnectionId() {
   return activePresetId;
@@ -165,6 +751,161 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+async function recordAppEvent(kind: string, message: string) {
+  try {
+    await invokeBackend("record_app_event", { kind, message });
+  } catch (error) {
+    console.error("Failed to record app event", error);
+  }
+}
+
+function quoteSqlIdentifier(identifier: string) {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function normalizeSQuerrlValue(rawValue: string) {
+  const value = rawValue.trim();
+  if (!value) {
+    throw new Error("Each SQuerL condition needs a value.");
+  }
+
+  if (/^'.*'$/.test(value)) {
+    return value;
+  }
+
+  if (/^".*"$/.test(value)) {
+    return `'${value.slice(1, -1).replace(/'/g, "''")}'`;
+  }
+
+  if (/^-?\d+(?:\.\d+)?$/.test(value) || /^(null|true|false|current_timestamp|current_date|current_time)$/i.test(value)) {
+    return value;
+  }
+
+  if (/^(\?[0-9]*|[:@$][A-Za-z_][A-Za-z0-9_]*)$/.test(value)) {
+    return value;
+  }
+
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function parseSQuerrlConditions(segment: string) {
+  const clauses: string[] = [];
+  let remaining = segment.trim();
+
+  while (remaining) {
+    const match = /^(has|not)\s+([A-Za-z_][A-Za-z0-9$]*)\s+(contains|!=|>=|<=|=|>|<)\s+([\s\S]+?)(?=(?:\s+(?:has|not)\s+[A-Za-z_][A-Za-z0-9$]*\s+(?:contains|!=|>=|<=|=|>|<)\s+)|$)/i.exec(remaining);
+    if (!match) {
+      throw new Error(`Unsupported SQuerL condition segment: ${remaining}`);
+    }
+
+    const [, mode, fieldName, operator, rawValue] = match;
+    const fieldSql = quoteSqlIdentifier(fieldName);
+    const valueSql = normalizeSQuerrlValue(rawValue);
+    const comparison = operator.toLowerCase() === "contains"
+      ? `${fieldSql} LIKE '%' || ${valueSql} || '%'`
+      : `${fieldSql} ${operator} ${valueSql}`;
+
+    clauses.push(mode.toLowerCase() === "not" ? `NOT (${comparison})` : comparison);
+    remaining = remaining.slice(match[0].length).trimStart();
+  }
+
+  return clauses;
+}
+
+function normalizeSQuerrlStatement(statement: string) {
+  return statement.trim().replace(/;+\s*$/, "");
+}
+
+function parseSQuerrlFields(fieldSegment: string) {
+  if (!fieldSegment) {
+    return ["*"];
+  }
+
+  const hasCommaSeparatedFields = fieldSegment.includes(",");
+  const selectedFields = fieldSegment
+    .split(hasCommaSeparatedFields ? /\s*,\s*/ : /\s+/)
+    .map((field) => field.trim())
+    .filter(Boolean);
+
+  if (selectedFields.includes("*") && selectedFields.length > 1) {
+    throw new Error("SQuerL fields cannot combine '*' with named fields.");
+  }
+
+  return selectedFields;
+}
+
+function translateSQuerrlToSql(statement: string) {
+  const trimmedStatement = normalizeSQuerrlStatement(statement);
+  const [tableName] = trimmedStatement.split(/\s+/);
+  if (!SQUERRL_IDENTIFIER_PATTERN.test(tableName ?? "")) {
+    throw new Error("SQuerL statements must start with a table name.");
+  }
+
+  const remainder = trimmedStatement.slice(tableName.length).trim();
+  const sortMatch = /(^|\s)(~up|~down)(?=\s|$)/i.exec(remainder);
+  const conditionMatch = /(^|\s)(has|not)\s+[A-Za-z_][A-Za-z0-9$]*\s+(contains|!=|>=|<=|=|>|<)\s+/i.exec(remainder);
+  const sortIndex = sortMatch ? sortMatch.index + sortMatch[1].length : -1;
+  const conditionIndex = conditionMatch ? conditionMatch.index + conditionMatch[1].length : -1;
+  const fieldSegmentEnd = [sortIndex, conditionIndex]
+    .filter((index) => index >= 0)
+    .reduce((smallest, index) => Math.min(smallest, index), remainder.length);
+  const fieldSegment = remainder.slice(0, fieldSegmentEnd).trim();
+  let trailingSegment = remainder.slice(fieldSegmentEnd).trim();
+
+  const selectedFields = parseSQuerrlFields(fieldSegment);
+
+  if (!selectedFields.length || selectedFields.some((field) => field !== "*" && !SQUERRL_IDENTIFIER_PATTERN.test(field))) {
+    throw new Error("SQuerL fields must be '*' or named fields separated by commas or spaces.");
+  }
+
+  let sortDirection: "ASC" | "DESC" | null = null;
+  if (/^~up\b/i.test(trailingSegment)) {
+    sortDirection = "ASC";
+    trailingSegment = trailingSegment.replace(/^~up\b/i, "").trim();
+  } else if (/^~down\b/i.test(trailingSegment)) {
+    sortDirection = "DESC";
+    trailingSegment = trailingSegment.replace(/^~down\b/i, "").trim();
+  }
+
+  const conditions = trailingSegment ? parseSQuerrlConditions(trailingSegment) : [];
+  const projection = selectedFields.length === 1 && selectedFields[0] === "*"
+    ? "*"
+    : selectedFields.map((field) => quoteSqlIdentifier(field)).join(", ");
+  const schemaTable = squerrlSchemaCache?.find((table) => table.name.toLowerCase() === tableName.toLowerCase());
+  const orderField = selectedFields.find((field) => field !== "*") ?? schemaTable?.fields[0];
+
+  if (sortDirection && !orderField) {
+    throw new Error(`SQuerL sort needs at least one sortable field for ${tableName}.`);
+  }
+
+  const sqlParts = [`SELECT ${projection}`, `FROM ${quoteSqlIdentifier(tableName)}`];
+  if (conditions.length) {
+    sqlParts.push(`WHERE ${conditions.join(" AND ")}`);
+  }
+  if (sortDirection && orderField) {
+    sqlParts.push(`ORDER BY ${quoteSqlIdentifier(orderField)} ${sortDirection}`);
+  }
+
+  return sqlParts.join(" ");
+}
+
+function prepareSqlExecution(statement: string): PreparedSqlExecution {
+  const trimmedStatement = statement.trim();
+  if (getEffectiveQueryLanguage() !== "squerrl" || SQL_PREFIX_PATTERN.test(trimmedStatement)) {
+    return {
+      statement: trimmedStatement,
+      squerrlStatement: null,
+    };
+  }
+
+  const normalizedSQuerrlStatement = normalizeSQuerrlStatement(trimmedStatement);
+
+  return {
+    statement: translateSQuerrlToSql(normalizedSQuerrlStatement),
+    squerrlStatement: normalizedSQuerrlStatement,
+  };
 }
 
 function normalizePreset(preset: Partial<ConnectionPreset>): ConnectionPreset {
@@ -271,7 +1012,7 @@ function readLegacyPresetStore(): PresetStore {
 }
 
 async function loadPresetStore() {
-  const store = await invoke<PresetStore>("load_preset_store");
+  const store = await invokeBackend<PresetStore>("load_preset_store");
   return {
     activePresetId: store.activePresetId ?? null,
     presets: Array.isArray(store.presets)
@@ -281,7 +1022,7 @@ async function loadPresetStore() {
 }
 
 async function persistPresetStore() {
-  await invoke("save_preset_store", {
+  await invokeBackend("save_preset_store", {
     store: {
       activePresetId,
       presets: connectionPresets,
@@ -379,13 +1120,21 @@ function closeQuerySearchModal() {
   querySearchModalEl?.close();
 }
 
+function openAppLogModal() {
+  appLogModalEl?.showModal();
+}
+
+function closeAppLogModal() {
+  appLogModalEl?.close();
+}
+
 async function performQuerySearch() {
   try {
     const searchText = querySearchInputEl?.value ?? "";
     const dateFrom = queryDateFromEl?.value ?? "";
     const dateTo = queryDateToEl?.value ?? "";
 
-    const entries = await invoke<SqlMemoryEntry[]>("load_sql_memory", {
+    const entries = await invokeBackend<SqlMemoryEntry[]>("load_sql_memory", {
       connectionId: getActiveConnectionId(),
       limit: 100,
     });
@@ -397,6 +1146,7 @@ async function performQuerySearch() {
       const lowerSearch = searchText.toLowerCase();
       filtered = filtered.filter((entry) =>
         entry.statement.toLowerCase().includes(lowerSearch)
+        || entry.squerrlStatement?.toLowerCase().includes(lowerSearch)
       );
     }
 
@@ -437,8 +1187,9 @@ async function populateQuerySearchResults(entries: SqlMemoryEntry[]) {
   querySearchResultsEl.innerHTML = entries
     .map(
       (entry) => `
-      <div class="query-search-result-item" data-query-text="${escapeHtml(entry.statement)}">
-        <p class="query-search-result-item__text">${escapeHtml(entry.statement)}</p>
+      <div class="query-search-result-item" data-query-text="${escapeHtml(entry.squerrlStatement || entry.statement)}" data-query-language="${entry.squerrlStatement ? "squerrl" : "sql"}">
+        ${entry.squerrlStatement ? `<p class="query-search-result-item__text"><strong>SQuerL:</strong> ${escapeHtml(entry.squerrlStatement)}</p>` : ""}
+        <p class="query-search-result-item__text"><strong>SQL:</strong> ${escapeHtml(entry.statement)}</p>
         <p class="query-search-result-item__meta">Used ${entry.executionCount} time${entry.executionCount === 1 ? "" : "s"} · Last: ${entry.lastSeenAt}</p>
       </div>
     `
@@ -463,22 +1214,25 @@ async function loadQueryFromSearch() {
 
   if (!selectedItem) {
     setLauncherMessage("Please select a query first.");
-    return;
+    return false;
   }
 
   const queryText = selectedItem.dataset.queryText;
+  const queryLanguage = (selectedItem.dataset.queryLanguage as QueryLanguage | undefined) ?? "sql";
   if (!queryText || !sqlEditorEl) {
-    return;
+    return false;
   }
 
   sqlEditorEl.value = queryText;
+  setEditorLanguage(queryLanguage, queryText);
   closeQuerySearchModal();
   setLauncherMessage("Query loaded from search.");
+  return true;
 }
 
 async function refreshSavedQueries() {
   try {
-    const entries = await invoke<SqlMemoryEntry[]>("load_sql_memory", {
+    const entries = await invokeBackend<SqlMemoryEntry[]>("load_sql_memory", {
       connectionId: getActiveConnectionId(),
       limit: 100,
     });
@@ -500,11 +1254,110 @@ function populateSavedQueriesDropdown(entries: SqlMemoryEntry[]) {
   // Add entries as options
   entries.forEach((entry) => {
     const option = document.createElement("option");
-    option.value = entry.statement;
-    option.title = entry.statement; // Full query shown on hover
-    option.textContent = entry.statement.substring(0, 60) + (entry.statement.length > 60 ? "..." : "");
+    const displayQuery = entry.squerrlStatement || entry.statement;
+    option.value = displayQuery;
+    option.dataset.queryLanguage = entry.squerrlStatement ? "squerrl" : "sql";
+    option.title = entry.squerrlStatement
+      ? `SQuerL: ${entry.squerrlStatement}\nSQL: ${entry.statement}`
+      : entry.statement;
+    option.textContent = displayQuery.substring(0, 60) + (displayQuery.length > 60 ? "..." : "");
     savedQueryDropdownEl!.appendChild(option);
   });
+}
+
+function populateAppLogKindFilter(entries: AppLogEntry[]) {
+  if (!appLogKindFilterEl) {
+    return;
+  }
+
+  const selectedValue = appLogKindFilterEl.value;
+  const kinds = Array.from(new Set(entries.map((entry) => entry.kind))).sort((left, right) => left.localeCompare(right));
+  appLogKindFilterEl.innerHTML = '<option value="">All kinds</option>';
+
+  kinds.forEach((kind) => {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = kind;
+    appLogKindFilterEl!.appendChild(option);
+  });
+
+  appLogKindFilterEl.value = kinds.includes(selectedValue) ? selectedValue : "";
+}
+
+function filterAppLogEntries(entries: AppLogEntry[]) {
+  const searchText = appLogSearchInputEl?.value.trim().toLowerCase() ?? "";
+  const kind = appLogKindFilterEl?.value ?? "";
+  const dateFrom = appLogDateFromEl?.value ?? "";
+  const dateTo = appLogDateToEl?.value ?? "";
+
+  return entries.filter((entry) => {
+    if (searchText) {
+      const haystack = `${entry.kind} ${entry.message} ${entry.createdAt}`.toLowerCase();
+      if (!haystack.includes(searchText)) {
+        return false;
+      }
+    }
+
+    if (kind && entry.kind !== kind) {
+      return false;
+    }
+
+    const createdAt = new Date(entry.createdAt).getTime();
+    if (dateFrom && createdAt < new Date(dateFrom).getTime()) {
+      return false;
+    }
+
+    if (dateTo) {
+      const inclusiveEnd = new Date(dateTo);
+      inclusiveEnd.setHours(23, 59, 59, 999);
+      if (createdAt > inclusiveEnd.getTime()) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function renderAppLogEntries(entries: AppLogEntry[]) {
+  if (!appLogResultsEl) {
+    return;
+  }
+
+  if (!entries.length) {
+    appLogResultsEl.innerHTML = '<p class="query-search-results__empty">No app log entries match the active filters.</p>';
+    return;
+  }
+
+  appLogResultsEl.innerHTML = entries
+    .map(
+      (entry) => `
+        <article class="app-log-entry">
+          <div class="app-log-entry__header">
+            <span class="app-log-entry__kind">${escapeHtml(entry.kind)}</span>
+            <span class="app-log-entry__timestamp">${escapeHtml(entry.createdAt)}</span>
+          </div>
+          <p class="app-log-entry__message">${escapeHtml(entry.message)}</p>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function applyAppLogFilters() {
+  renderAppLogEntries(filterAppLogEntries(appLogEntriesCache));
+}
+
+async function refreshAppLog() {
+  try {
+    const entries = await invokeBackend<AppLogEntry[]>("load_app_log", { limit: 250 });
+    appLogEntriesCache = entries;
+    populateAppLogKindFilter(entries);
+    applyAppLogFilters();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setLauncherMessage(message, true);
+  }
 }
 
 function hideSQuerrlPicker() {
@@ -564,7 +1417,7 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
   const fieldChoices = table.fields;
   const operatorChoices = ["=", "!=", ">", "<", ">=", "<=", "contains"];
   squerrlPickerEl.setAttribute("aria-label", `SQuerL condition builder for ${table.name}`);
-  squerrlPickerEl.innerHTML = `<div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerL</span><h3>Build criteria</h3></div><span class="squerrl-picker__status">Arrows move controls. Enter or click changes a choice.</span></div><div class="squerrl-condition-builder" aria-label="SQuerL condition builder"><button type="button" id="squerrl-condition-mode" class="squerrl-condition-choice" data-value="has " aria-label="Condition mode">has</button><button type="button" id="squerrl-condition-field" class="squerrl-condition-choice" data-value="${escapeHtml(fieldChoices[0] ?? "")}" aria-label="Condition field">${escapeHtml(fieldChoices[0] ?? "")}</button><button type="button" id="squerrl-condition-operator" class="squerrl-condition-choice" data-value="=" aria-label="Condition operator">=</button><input id="squerrl-condition-value" type="text" placeholder="Value or variable" aria-label="Condition value or variable" /><button type="button" id="squerrl-add-condition">Add condition</button><button type="button" id="squerrl-finish-conditions">Finish</button></div>`;
+  squerrlPickerEl.innerHTML = `<div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerL</span><h3>Build criteria</h3></div><span id="squerrl-condition-status" class="squerrl-picker__status">Step 1 of 6 · choose has or not</span></div><div class="squerrl-condition-builder" aria-label="SQuerL condition builder"><button type="button" id="squerrl-condition-mode" class="squerrl-condition-choice" data-value="has " aria-label="Condition mode">has</button><button type="button" id="squerrl-condition-field" class="squerrl-condition-choice" data-value="${escapeHtml(fieldChoices[0] ?? "")}" aria-label="Condition field">${escapeHtml(fieldChoices[0] ?? "")}</button><button type="button" id="squerrl-condition-operator" class="squerrl-condition-choice" data-value="=" aria-label="Condition operator">=</button><input id="squerrl-condition-value" type="text" placeholder="Value or variable" aria-label="Condition value or variable" /><button type="button" id="squerrl-add-condition">Add condition</button><button type="button" id="squerrl-finish-conditions">Finish</button></div>`;
   squerrlPickerEl.onkeydown = null;
   squerrlPickerOptionsEl = null;
   squerrlTableSearchEl = null;
@@ -576,9 +1429,17 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
   const valueEl = squerrlPickerEl.querySelector<HTMLInputElement>("#squerrl-condition-value");
   const addButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-add-condition");
   const finishButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-finish-conditions");
+  const statusEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-condition-status");
   const controls = [modeEl, fieldEl, operatorEl, valueEl, addButton, finishButton].filter(
     (control): control is HTMLInputElement | HTMLButtonElement => Boolean(control)
   );
+  const stepLabels = ["choose has or not", "choose a field", "choose an operator", "enter a value or variable", "add the condition", "finish conditions"];
+  const updateStepStatus = (control: HTMLInputElement | HTMLButtonElement) => {
+    const stepIndex = controls.indexOf(control);
+    if (statusEl && stepIndex >= 0) {
+      statusEl.textContent = `Step ${stepIndex + 1} of ${controls.length} · ${stepLabels[stepIndex]}`;
+    }
+  };
 
   squerrlConditionKeyboardController?.abort();
   squerrlConditionKeyboardController = new AbortController();
@@ -616,6 +1477,7 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
   operatorEl?.addEventListener("click", () => cycleChoice(operatorEl, operatorChoices));
 
   controls.forEach((control, controlIndex) => {
+    control.addEventListener("focus", () => updateStepStatus(control));
     control.onkeydown = (event) => {
       const key = event.key.toLowerCase();
       if (event.key === "Escape") {
@@ -670,9 +1532,42 @@ function getSQuerrlContext() {
   const hasFrom = /\bfrom\b/i.test(beforeCursor);
   const hasClause = /\b(where|order\s+by)\b/i.test(beforeCursor);
   const trigger = Boolean(prefix) || /\s$/.test(beforeCursor);
-  const language = activeQueryLanguage ?? (queryLanguageEl?.value ?? "pythia") as QueryLanguage;
+  const language = getEffectiveQueryLanguage();
 
   return { cursor, beforeCursor, beforeToken, prefix, fromMatch, hasFrom, hasClause, trigger, language };
+}
+
+function getEffectiveQueryLanguage(): QueryLanguage {
+  return (queryLanguageEl?.value ?? activeQueryLanguage ?? "squerrl") as QueryLanguage;
+}
+
+function setEditorLanguage(language: QueryLanguage, queryText = "") {
+  const firstToken = queryText.trim().split(/\s+/)[0];
+  activeQueryLanguage = language;
+  activeSQuerrlTableName = language === "squerrl"
+    ? firstToken || null
+    : null;
+  activeSQuerrlStage = null;
+  selectedSQuerrlFields.clear();
+
+  if (queryLanguageEl) {
+    queryLanguageEl.value = language;
+  }
+
+  const modeBadge = document.querySelector<HTMLElement>("#editor-mode-badge");
+  if (modeBadge) {
+    const modeLabel = language === "freeform"
+      ? "Non Assist"
+      : language === "sql"
+        ? "SQL Assist"
+        : "SQuerL";
+    modeBadge.textContent = modeLabel;
+    modeBadge.dataset.mode = language;
+  }
+}
+
+function isAssistLanguage(language: QueryLanguage) {
+  return language === "squerrl" || language === "sql";
 }
 
 function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
@@ -685,12 +1580,9 @@ function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
     const selectedTable = squerrlSchemaCache?.find(
       (table) => table.name.toLowerCase() === suggestion.value.trim().toLowerCase()
     );
-    activeQueryLanguage = selectedTable ? "pythia" : "sql";
+    setEditorLanguage(selectedTable ? "squerrl" : "sql", suggestion.value.trim());
     activeSQuerrlTableName = selectedTable?.name ?? null;
     activeSQuerrlStage = selectedTable ? "fields" : null;
-    if (queryLanguageEl) {
-      queryLanguageEl.value = activeQueryLanguage;
-    }
   }
 
   const insertStart = context.cursor - context.prefix.length;
@@ -778,14 +1670,31 @@ function commitSQuerrlFields() {
   sqlEditorEl.focus();
 }
 
-function renderSQuerrlPicker(title: string, status: string, suggestions: SQuerrlSuggestion[], context: ReturnType<typeof getSQuerrlContext>, searchableTables?: SqlSchemaTable[], multiSelect = false, showSortControl = false) {
+function renderSQuerrlPicker(
+  title: string,
+  status: string,
+  suggestions: SQuerrlSuggestion[],
+  context: ReturnType<typeof getSQuerrlContext>,
+  searchableTables?: SqlSchemaTable[],
+  multiSelect = false,
+  showSortControl = false,
+  pickerOptions: SQuerrlPickerOptions = {}
+) {
   if (!squerrlPickerEl || !squerrlPickerTitleEl || !squerrlPickerStatusEl || !squerrlPickerOptionsEl || !context) {
     return;
   }
 
+  const fieldScopeTables = pickerOptions.fieldScopeTables ?? [];
+  const usesFieldScope = fieldScopeTables.length > 0;
+  const tableFilterMarkup = usesFieldScope
+    ? `<label class="squerrl-picker__table-filter" for="squerrl-table-filter"><span>Table</span><select id="squerrl-table-filter" aria-label="Filter fields by table"><option value="">All tables</option>${fieldScopeTables
+        .map((table) => `<option value="${escapeHtml(table.name)}">${escapeHtml(table.name)}</option>`)
+        .join("")}</select></label>`
+    : "";
+
   squerrlSelectedIndex = 0;
   squerrlPickerEl.setAttribute("aria-label", `${title}. ${status}`);
-  squerrlPickerEl.innerHTML = `${showSortControl ? '<label class="squerrl-picker__sort" for="squerrl-sort-order"><span>Sort</span><select id="squerrl-sort-order" aria-label="Optional SQuerL sort order"><option value="">NO SORT</option><option value="~up ">~up</option><option value="~down ">~down</option></select></label>' : ""}<input id="squerrl-table-search" class="squerrl-picker__search" type="search" placeholder="Filter SQL prefixes or tables" autocomplete="off" aria-label="Filter SQL prefixes or tables" /><div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerrl</span><h3 id="squerrl-picker-title"></h3></div><span id="squerrl-picker-status" class="squerrl-picker__status"></span></div><div id="squerrl-picker-options" class="squerrl-picker__options"></div>`;
+  squerrlPickerEl.innerHTML = `${showSortControl ? '<label class="squerrl-picker__sort" for="squerrl-sort-order"><span>Sort</span><select id="squerrl-sort-order" aria-label="Optional SQuerL sort order"><option value="">NO SORT</option><option value="~up ">~up</option><option value="~down ">~down</option></select></label>' : ""}${tableFilterMarkup}<input id="squerrl-table-search" class="squerrl-picker__search" type="search" placeholder="Filter suggestions" autocomplete="off" aria-label="Filter suggestions" /><div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerrl</span><h3 id="squerrl-picker-title"></h3></div><span id="squerrl-picker-status" class="squerrl-picker__status"></span></div><div id="squerrl-picker-options" class="squerrl-picker__options"></div>`;
   const pickerTitleEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-title");
   const pickerStatusEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-status");
   const pickerOptionsEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-options");
@@ -796,6 +1705,10 @@ function renderSQuerrlPicker(title: string, status: string, suggestions: SQuerrl
   squerrlPickerStatusEl = pickerStatusEl;
   squerrlPickerOptionsEl = pickerOptionsEl;
   squerrlTableSearchEl = squerrlPickerEl.querySelector("#squerrl-table-search");
+  const tableFilterEl = squerrlPickerEl.querySelector<HTMLSelectElement>("#squerrl-table-filter");
+  if (squerrlTableSearchEl && usesFieldScope) {
+    squerrlTableSearchEl.value = context.prefix;
+  }
   pickerTitleEl.textContent = title;
   pickerStatusEl.textContent = status;
   constrainSQuerrlPickerFocus(() => {
@@ -893,15 +1806,37 @@ function renderSQuerrlPicker(title: string, status: string, suggestions: SQuerrl
     value: table.name,
     detail: `${table.fields.length} field${table.fields.length === 1 ? "" : "s"}`,
   })) ?? [];
-  const searchItems = [...suggestions, ...tableSuggestions];
+
+  const buildScopedFieldSuggestions = (tableFilterName: string) => {
+    const scopedTables = tableFilterName
+      ? fieldScopeTables.filter((table) => table.name === tableFilterName)
+      : fieldScopeTables;
+    const scopedFields = Array.from(new Set(scopedTables.flatMap((table) => table.fields)))
+      .sort((left, right) => left.localeCompare(right))
+      .map((field) => ({ label: field, value: field, detail: "field" }));
+
+    if (!pickerOptions.includeStarOption) {
+      return scopedFields;
+    }
+
+    return [{ label: "*", value: "* ", detail: "all fields" }, ...scopedFields];
+  };
+
+  const getFilteredItems = () => {
+    const searchTerm = squerrlTableSearchEl?.value.toLowerCase() ?? "";
+    if (usesFieldScope) {
+      const tableFilterName = tableFilterEl?.value ?? "";
+      return buildScopedFieldSuggestions(tableFilterName)
+        .filter((item) => item.label.toLowerCase().includes(searchTerm));
+    }
+
+    return [...suggestions, ...tableSuggestions]
+      .filter((item) => item.label.toLowerCase().includes(searchTerm));
+  };
 
   if (squerrlTableSearchEl) {
     squerrlTableSearchEl.addEventListener("input", () => {
-      const searchTerm = squerrlTableSearchEl!.value.toLowerCase();
-      renderOptions(
-        searchItems
-          .filter((item) => item.label.toLowerCase().includes(searchTerm))
-      );
+      renderOptions(getFilteredItems());
     });
     squerrlTableSearchEl.addEventListener("keydown", (event) => {
       if (event.key === "ArrowDown") {
@@ -922,7 +1857,11 @@ function renderSQuerrlPicker(title: string, status: string, suggestions: SQuerrl
     });
   }
 
-  renderOptions(suggestions);
+  tableFilterEl?.addEventListener("change", () => {
+    renderOptions(getFilteredItems());
+  });
+
+  renderOptions(usesFieldScope ? getFilteredItems() : suggestions);
   squerrlPickerEl.hidden = false;
 }
 
@@ -937,7 +1876,7 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
   try {
     const schemaKey = getActiveConnectionId() ?? "__internal_workspace__";
     if (squerrlSchemaCacheKey !== schemaKey || !squerrlSchemaCache) {
-      squerrlSchemaCache = await invoke<SqlSchemaTable[]>("load_sql_schema", {
+      squerrlSchemaCache = await invokeBackend<SqlSchemaTable[]>("load_sql_schema", {
         connectionId: getActiveConnectionId(),
       });
       squerrlSchemaCacheKey = schemaKey;
@@ -954,9 +1893,9 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
     );
     const selectedTables = schema.filter((table) => selectedTableNames.has(table.name.toLowerCase()));
 
-    const languageLabel = context.language === "sql" ? "SQL" : "PythiaJS";
+    const languageLabel = context.language === "sql" ? "SQL Assist" : context.language === "freeform" ? "Non Assist" : "SQuerL";
 
-    if (context.language === "pythia" && activeSQuerrlTableName && activeSQuerrlStage === "conditions") {
+    if (context.language === "squerrl" && activeSQuerrlTableName && activeSQuerrlStage === "conditions") {
       const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
       if (selectedTable) {
         renderSQuerrlConditionBuilder(selectedTable);
@@ -964,7 +1903,7 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
       }
     }
 
-    if (context.language === "pythia" && activeSQuerrlTableName && activeSQuerrlStage === "fields") {
+    if (context.language === "squerrl" && activeSQuerrlTableName && activeSQuerrlStage === "fields") {
       const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
       const hasOnlySelectedTable = context.beforeCursor.trim().toLowerCase() === activeSQuerrlTableName.toLowerCase();
       if (selectedTable && hasOnlySelectedTable) {
@@ -983,6 +1922,11 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
       }
     }
 
+    if (context.language === "freeform") {
+      hideSQuerrlPicker();
+      return;
+    }
+
     if (context.fromMatch) {
       renderSQuerrlPicker(
         "Choose a table",
@@ -990,6 +1934,28 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
         tables.map((table) => ({ label: table.name, value: table.name, detail: `${table.fields.length} field${table.fields.length === 1 ? "" : "s"}` })),
         context,
         schema
+      );
+      return;
+    }
+
+    const isSqlSelectProjection =
+      context.language === "sql" &&
+      /^\s*select\b/i.test(context.beforeCursor) &&
+      !context.hasFrom;
+
+    if (isSqlSelectProjection) {
+      renderSQuerrlPicker(
+        "Choose fields",
+        `SQL Assist · select fields first, then add FROM`,
+        [],
+        context,
+        undefined,
+        false,
+        false,
+        {
+          fieldScopeTables: schema,
+          includeStarOption: true,
+        }
       );
       return;
     }
@@ -1294,7 +2260,7 @@ async function testPresetConnection() {
   try {
     const preset = readPresetForm();
     setPresetBusy(true);
-    const result = await invoke<ConnectionTestResult>("test_connection", { preset });
+    const result = await invokeBackend<ConnectionTestResult>("test_connection", { preset });
     setLauncherMessage(result.summary);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1304,31 +2270,57 @@ async function testPresetConnection() {
   }
 }
 
-async function runSql(event: SubmitEvent) {
-  event.preventDefault();
-
+async function runSql() {
   if (!sqlEditorEl) {
     return;
   }
 
-  const sql = sqlEditorEl.value.trim();
-  if (!sql) {
+  const editorStatement = sqlEditorEl.value.trim();
+  if (!editorStatement) {
     setLauncherMessage("Enter a SQL query first.", true);
     return;
   }
 
   try {
+    const connectionId = getActiveConnectionId();
+    const queryLanguage = getEffectiveQueryLanguage();
+    const bufferedSQuerrlStatement = queryLanguage === "squerrl"
+      ? normalizeSQuerrlStatement(editorStatement)
+      : null;
+    const execution = prepareSqlExecution(editorStatement);
     runSqlButtonEl?.toggleAttribute("disabled", true);
     clearSqlButtonEl?.toggleAttribute("disabled", true);
-    const result = await invoke<SqlQueryResult>("execute_sql_query", {
-      connectionId: getActiveConnectionId(),
-      sql,
+
+    if (bufferedSQuerrlStatement) {
+      sqlEditorEl.value = execution.statement;
+      setEditorLanguage("sql", execution.statement);
+    }
+
+    sqlResultsStatusEl!.textContent = execution.squerrlStatement
+      ? `Buffered SQuerL. Translated to SQL. Running against ${connectionId ?? "internal workspace database"}...`
+      : `Running SQL against ${connectionId ?? "internal workspace database"}...`;
+    setLauncherMessage(execution.squerrlStatement
+      ? "SQuerL buffered, translated to SQL, and running query..."
+      : "Running SQL query...");
+    const result = await invokeBackend<SqlQueryResult>("execute_sql_query", {
+      connectionId,
+      sql: execution.statement,
     });
     renderSqlResults(result);
-    await invoke("record_sql_memory", {
-      connectionId: getActiveConnectionId(),
-      statement: sql,
+
+    const hasSqlMemoryStatement = await invokeBackend<boolean>("has_sql_memory_statement", {
+      connectionId,
+      statement: execution.statement,
     });
+
+    if (!hasSqlMemoryStatement) {
+      await invokeBackend("record_sql_memory", {
+        connectionId,
+        statement: execution.statement,
+        squerrlStatement: bufferedSQuerrlStatement,
+      });
+    }
+
     await refreshSavedQueries();
     setLauncherMessage(result.message);
   } catch (error) {
@@ -1348,23 +2340,34 @@ async function openSqlApp(mode: "tauri" | "browser") {
 
     if (mode === "tauri") {
       setLaunchMenuOpen(false);
-      await invoke("open_sql_window", { url: targetUrl });
+      await invokeBackend("open_sql_window", { url: targetUrl });
       setLauncherMessage(`Opened ${targetUrl} in a new Tauri window.`);
+      void recordAppEvent("ui.launch.tauri", `Opened SQL app in a Tauri window for ${targetUrl}`);
       return;
     }
 
     setLaunchMenuOpen(false);
     await openUrl(targetUrl);
     setLauncherMessage(`Opened ${targetUrl} in your default browser.`);
+    void recordAppEvent("ui.launch.browser", `Opened SQL app in the default browser for ${targetUrl}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setLauncherMessage(message, true);
+    void recordAppEvent("ui.launch.error", `Failed to open SQL app in ${mode} mode: ${message}`);
   } finally {
     setLauncherBusy(false);
   }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+let hasInitializedApp = false;
+
+function initializeApp() {
+  if (hasInitializedApp) {
+    return;
+  }
+
+  hasInitializedApp = true;
+
   launcherUrlEl = document.querySelector("#launcher-url");
   launcherMsgEl = document.querySelector("#launcher-msg");
   openTauriButtonEl = document.querySelector("#open-tauri-button");
@@ -1383,6 +2386,7 @@ window.addEventListener("DOMContentLoaded", () => {
   queryLanguageEl = document.querySelector("#query-language");
   savedQueryDropdownEl = document.querySelector("#saved-query-dropdown");
   querySearchButtonEl = document.querySelector("#query-search-button");
+  appLogButtonEl = document.querySelector("#app-log-button");
   runSqlButtonEl = document.querySelector("#run-sql-button");
   clearSqlButtonEl = document.querySelector("#clear-sql-button");
   squerrlPickerEl = document.querySelector("#squerrl-picker");
@@ -1401,6 +2405,15 @@ window.addEventListener("DOMContentLoaded", () => {
   loadQueryFromSearchButtonEl = document.querySelector("#load-query-from-search-button");
   clearQuerySearchButtonEl = document.querySelector("#clear-query-search-button");
   closeQuerySearchModalButtonEl = document.querySelector("#close-query-search-modal-button");
+  appLogModalEl = document.querySelector("#app-log-modal");
+  appLogSearchInputEl = document.querySelector("#app-log-search-input");
+  appLogKindFilterEl = document.querySelector("#app-log-kind-filter");
+  appLogDateFromEl = document.querySelector("#app-log-date-from");
+  appLogDateToEl = document.querySelector("#app-log-date-to");
+  appLogResultsEl = document.querySelector("#app-log-results");
+  refreshAppLogButtonEl = document.querySelector("#refresh-app-log-button");
+  clearAppLogFiltersButtonEl = document.querySelector("#clear-app-log-filters-button");
+  closeAppLogModalButtonEl = document.querySelector("#close-app-log-modal-button");
   presetFormEl = document.querySelector("#preset-form");
   presetIdEl = document.querySelector("#preset-id");
   presetNameEl = document.querySelector("#preset-name");
@@ -1417,10 +2430,11 @@ window.addEventListener("DOMContentLoaded", () => {
   resetPresetButtonEl = document.querySelector("#reset-preset-button");
   connectionModalEl = document.querySelector("#connection-modal");
   closeConnectionModalButtonEl = document.querySelector("#close-connection-modal-button");
+  applyRuntimeAvailabilityState();
   installTopHorizontalScrollbar();
   renderSqlResults(null);
 
-  void invoke<WorkspaceDatabaseInfo>("load_workspace_database_info")
+  void invokeBackend<WorkspaceDatabaseInfo>("load_workspace_database_info")
     .then((info) => {
       workspaceDatabaseInfo = info;
       renderWorkspaceDatabaseInfo();
@@ -1465,7 +2479,12 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   sqlEditorFormEl?.addEventListener("submit", (event) => {
-    void runSql(event);
+    event.preventDefault();
+    void runSql();
+  });
+
+  runSqlButtonEl?.addEventListener("click", () => {
+    void runSql();
   });
 
   sqlEditorEl?.addEventListener("input", () => {
@@ -1479,13 +2498,13 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   queryLanguageEl?.addEventListener("change", () => {
-    activeQueryLanguage = queryLanguageEl!.value as QueryLanguage;
-    activeSQuerrlTableName = null;
-    activeSQuerrlStage = null;
-    selectedSQuerrlFields.clear();
+    const nextLanguage = queryLanguageEl!.value as QueryLanguage;
+    setEditorLanguage(nextLanguage, sqlEditorEl?.value ?? "");
     hideSQuerrlPicker();
     void maybeShowSQuerrlPicker();
-    setLauncherMessage(`${queryLanguageEl!.options[queryLanguageEl!.selectedIndex].text} authoring selected.`);
+    const modeLabel = queryLanguageEl!.options[queryLanguageEl!.selectedIndex].text;
+    setLauncherMessage(`${modeLabel} selected.`);
+    void recordAppEvent("ui.query.mode", `Switched query authoring mode to ${modeLabel}`);
   });
 
   sqlEditorEl?.addEventListener("click", () => {
@@ -1493,25 +2512,33 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   sqlEditorEl?.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown" && activeQueryLanguage === "pythia" && activeSQuerrlStage === "options") {
+    const activeLanguage = getEffectiveQueryLanguage();
+
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !isAssistLanguage(activeLanguage)) {
+      return;
+    }
+
+    if (event.key === "ArrowDown" && activeQueryLanguage === "squerrl" && activeSQuerrlStage === "options") {
       event.preventDefault();
       openSQuerrlSortOverlay();
       return;
     }
 
     if (squerrlPickerEl?.hidden) {
-      if (event.key === "ArrowDown") {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         void maybeShowSQuerrlPicker(true).then(() => {
+          const options = squerrlPickerOptionsEl?.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]");
+          if (!options?.length) {
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            focusSQuerrlSelection(options.length - 1);
+            return;
+          }
           focusSQuerrlSelection(0);
         });
       }
-      return;
-    }
-
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      focusSQuerrlSelection(0);
       return;
     }
 
@@ -1559,21 +2586,34 @@ window.addEventListener("DOMContentLoaded", () => {
   savedQueryDropdownEl?.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     const query = target.value;
+    const selectedOption = target.selectedOptions[0];
+    const queryLanguage = (selectedOption?.dataset.queryLanguage as QueryLanguage | undefined) ?? "sql";
 
     if (query && sqlEditorEl) {
       sqlEditorEl.value = query;
+      setEditorLanguage(queryLanguage, query);
       setLauncherMessage("Query loaded into workspace.");
+      void recordAppEvent("ui.query.load.saved", `Loaded a saved ${queryLanguage === "squerrl" ? "SQuerL" : "SQL"} statement from the dropdown`);
       target.value = ""; // Reset dropdown
     }
   });
 
   querySearchButtonEl?.addEventListener("click", () => {
     openQuerySearchModal();
+    void performQuerySearch();
+    void recordAppEvent("ui.query.search.open", "Opened the saved-query search modal");
+  });
+
+  appLogButtonEl?.addEventListener("click", () => {
+    openAppLogModal();
+    void refreshAppLog();
+    void recordAppEvent("ui.app-log.open", "Opened the application log viewer");
   });
 
   resetPresetButtonEl?.addEventListener("click", () => {
     resetPresetForm();
     setLauncherMessage("Ready to add a new external connection.");
+    void recordAppEvent("ui.connection.reset", "Reset the connection form for a new external connection");
   });
 
   clearSqlButtonEl?.addEventListener("click", () => {
@@ -1587,6 +2627,7 @@ window.addEventListener("DOMContentLoaded", () => {
     selectedSQuerrlFields.clear();
     hideSQuerrlPicker();
     renderSqlResults(null);
+    void recordAppEvent("ui.query.clear", "Cleared the SQL workspace editor and results surface");
   });
 
   useInternalDbButtonEl?.addEventListener("click", () => {
@@ -1609,6 +2650,7 @@ window.addEventListener("DOMContentLoaded", () => {
     void refreshSavedQueries();
     updateDatabaseSelector();
     setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
+    void recordAppEvent("ui.database.switch", `Switched active database target to ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
   });
 
   toggleFavoriteDatabaseEl?.addEventListener("click", () => {
@@ -1617,6 +2659,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // But we can optionally show a message
     if (activePresetId === null) {
       setLauncherMessage("Internal workspace database is your default.");
+      void recordAppEvent("ui.database.default", "Viewed the current default database setting for the internal workspace database");
     } else {
       // Switch to internal as default
       activePresetId = null;
@@ -1625,20 +2668,24 @@ window.addEventListener("DOMContentLoaded", () => {
       void refreshSavedQueries();
       updateDatabaseSelector();
       setLauncherMessage("Internal workspace database is now your default.");
+      void recordAppEvent("ui.database.default", "Set the internal workspace database as the default target");
     }
   });
 
   addDatabaseButtonEl?.addEventListener("click", () => {
     resetPresetForm();
     openConnectionModal();
+    void recordAppEvent("ui.connection.open", "Opened the external connection modal");
   });
 
   closeConnectionModalButtonEl?.addEventListener("click", () => {
     closeConnectionModal();
+    void recordAppEvent("ui.connection.close", "Closed the external connection modal");
   });
 
   closeQuerySearchModalButtonEl?.addEventListener("click", () => {
     closeQuerySearchModal();
+    void recordAppEvent("ui.query.search.close", "Closed the saved-query search modal");
   });
 
   querySearchInputEl?.addEventListener("input", () => {
@@ -1658,10 +2705,50 @@ window.addEventListener("DOMContentLoaded", () => {
     if (queryDateFromEl) queryDateFromEl.value = "";
     if (queryDateToEl) queryDateToEl.value = "";
     void populateQuerySearchResults([]);
+    void recordAppEvent("ui.query.search.clear", "Cleared saved-query search filters");
   });
 
   loadQueryFromSearchButtonEl?.addEventListener("click", () => {
-    void loadQueryFromSearch();
+    void loadQueryFromSearch().then((wasLoaded) => {
+      if (wasLoaded) {
+        void recordAppEvent("ui.query.load.search", "Loaded a saved query from the query search modal");
+      }
+    });
+  });
+
+  closeAppLogModalButtonEl?.addEventListener("click", () => {
+    closeAppLogModal();
+    void recordAppEvent("ui.app-log.close", "Closed the application log viewer");
+  });
+
+  refreshAppLogButtonEl?.addEventListener("click", () => {
+    void refreshAppLog();
+    void recordAppEvent("ui.app-log.refresh", "Refreshed the application log viewer");
+  });
+
+  clearAppLogFiltersButtonEl?.addEventListener("click", () => {
+    if (appLogSearchInputEl) appLogSearchInputEl.value = "";
+    if (appLogKindFilterEl) appLogKindFilterEl.value = "";
+    if (appLogDateFromEl) appLogDateFromEl.value = "";
+    if (appLogDateToEl) appLogDateToEl.value = "";
+    applyAppLogFilters();
+    void recordAppEvent("ui.app-log.clear", "Cleared application log filters");
+  });
+
+  appLogSearchInputEl?.addEventListener("input", () => {
+    applyAppLogFilters();
+  });
+
+  appLogKindFilterEl?.addEventListener("change", () => {
+    applyAppLogFilters();
+  });
+
+  appLogDateFromEl?.addEventListener("change", () => {
+    applyAppLogFilters();
+  });
+
+  appLogDateToEl?.addEventListener("change", () => {
+    applyAppLogFilters();
   });
 
   testPresetButtonEl?.addEventListener("click", () => {
@@ -1745,4 +2832,12 @@ window.addEventListener("DOMContentLoaded", () => {
       setLaunchMenuOpen(false, "button");
     }
   });
-});
+
+  setLauncherMessage("Rusty Pythia workspace ready.");
+}
+
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", initializeApp, { once: true });
+} else {
+  initializeApp();
+}
