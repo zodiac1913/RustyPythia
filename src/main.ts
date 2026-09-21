@@ -1727,6 +1727,31 @@ function isAssistLanguage(language: QueryLanguage) {
   return language === "squerrl" || language === "sql";
 }
 
+// SQL Assist writes straight into the editor, so schema names have to arrive
+// already quoted or reserved words like "User" become syntax errors. Only
+// names the schema knows are quoted, leaving keywords such as SELECT bare.
+// SQuerL is untouched because its translator quotes at execution time.
+function quoteSqlAssistValue(value: string, language: QueryLanguage) {
+  if (language !== "sql") {
+    return value;
+  }
+
+  const name = value.trim();
+  if (!name || name === "*" || !squerrlSchemaCache) {
+    return value;
+  }
+
+  if (squerrlSchemaCache.some((table) => table.name === name)) {
+    return value.replace(name, quoteSqlTableName(name));
+  }
+
+  if (squerrlSchemaCache.some((table) => table.fields.includes(name))) {
+    return value.replace(name, quoteSqlIdentifier(name));
+  }
+
+  return value;
+}
+
 function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
   const context = getSQuerrlContext();
   if (!sqlEditorEl || !context) {
@@ -1741,7 +1766,12 @@ function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
   }
 
   const insertStart = context.cursor - context.prefix.length;
-  sqlEditorEl.setRangeText(suggestion.value, insertStart, context.cursor, "end");
+  sqlEditorEl.setRangeText(
+    quoteSqlAssistValue(suggestion.value, getEffectiveQueryLanguage()),
+    insertStart,
+    context.cursor,
+    "end"
+  );
   sqlEditorEl.focus();
   hideSQuerrlPicker();
 }
