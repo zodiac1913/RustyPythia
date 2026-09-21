@@ -218,7 +218,59 @@ fn read_connection_password(connection_id: &str) -> Result<Option<String>, Strin
     }
 }
 
+/// Stores the secret with an open keychain ACL.
+///
+/// A keychain item normally records which binary created it, and macOS asks
+/// for the login password whenever a different binary reads it. Dev builds are
+/// re-signed on every rebuild, so the app always looks like a stranger and the
+/// prompt never stops. An open ACL matches how SSMS saves SQL passwords on
+/// Windows: a DPAPI blob that any process running as the same user can read
+/// without prompting. The trade-off is the same as DPAPI's, namely that any
+/// code running as this user can read the secret.
+#[cfg(target_os = "macos")]
+fn store_password_without_acl_prompt(connection_id: &str, password: &str) -> Result<(), String> {
+    // Updating in place keeps the old restrictive ACL, so replace the item.
+    let _ = std::process::Command::new("/usr/bin/security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYRING_SERVICE,
+            "-a",
+            connection_id,
+        ])
+        .output();
+
+    let output = std::process::Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-A",
+            "-s",
+            KEYRING_SERVICE,
+            "-a",
+            connection_id,
+            "-w",
+            password,
+        ])
+        .output()
+        .map_err(|err| format!("Failed to run security(1) to store the password: {}", err))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to store the password for {} in the keychain: {}",
+            connection_id,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(())
+}
+
 fn write_connection_password(connection_id: &str, password: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    store_password_without_acl_prompt(connection_id, password)?;
+
+    #[cfg(not(target_os = "macos"))]
     keyring_entry(connection_id)?
         .set_password(password)
         .map_err(|err| {
