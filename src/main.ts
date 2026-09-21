@@ -778,6 +778,11 @@ function getActiveConnectionId() {
   return activePresetId;
 }
 
+// Status text is read by humans, so never show the raw preset UUID.
+function getActiveConnectionLabel() {
+  return getPresetById(activePresetId)?.name ?? "internal workspace database";
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -2522,11 +2527,20 @@ async function testPresetConnection() {
   }
 }
 
+// Connections already checked this session, so the expiry probe never opens a
+// second connection (and never triggers a second Keychain prompt) for one.
+const passwordStatusChecked = new Set<string>();
+
 async function checkActiveConnectionPasswordStatus() {
   const preset = getPresetById(activePresetId);
   if (!preset || preset.engine !== "mssql" || preset.authMode !== "sql") {
     return;
   }
+
+  if (passwordStatusChecked.has(preset.id)) {
+    return;
+  }
+  passwordStatusChecked.add(preset.id);
 
   try {
     const result = await invokeBackend<ConnectionTestResult>("test_connection", { preset });
@@ -2615,9 +2629,10 @@ async function runSql() {
       setEditorLanguage("sql");
     }
 
+    const connectionLabel = getActiveConnectionLabel();
     sqlResultsStatusEl!.textContent = execution.squerrlStatement
-      ? `Buffered SQuerL. Translated to SQL. Running against ${connectionId ?? "internal workspace database"}...`
-      : `Running SQL against ${connectionId ?? "internal workspace database"}...`;
+      ? `Buffered SQuerL. Translated to SQL. Running against ${connectionLabel}...`
+      : `Running SQL against ${connectionLabel}...`;
     setLauncherMessage(execution.squerrlStatement
       ? "SQuerL buffered, translated to SQL, and running query..."
       : "Running SQL query...");
@@ -2626,6 +2641,10 @@ async function runSql() {
       sql: execution.statement,
     });
     renderSqlResults(result);
+
+    // The query already authenticated, so the password is cached in the
+    // backend and this expiry probe costs no extra Keychain prompt.
+    void checkActiveConnectionPasswordStatus();
 
     const hasSqlMemoryStatement = await invokeBackend<boolean>("has_sql_memory_statement", {
       connectionId,
@@ -2797,8 +2816,10 @@ function initializeApp() {
       activePresetId = store.activePresetId;
       renderPresetList();
       syncLauncherUrlToActivePreset();
+      // Deliberately no password-status probe here: connecting at startup
+      // reads the Keychain and makes macOS ask for the login password before
+      // the user has asked for anything. It runs after the first query instead.
       void refreshSavedQueries();
-      void checkActiveConnectionPasswordStatus();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -3017,7 +3038,6 @@ function initializeApp() {
     void persistPresetStore();
     syncLauncherUrlToActivePreset();
     void refreshSavedQueries();
-    void checkActiveConnectionPasswordStatus();
     updateDatabaseSelector();
     setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
     void recordAppEvent("ui.database.switch", `Switched active database target to ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);

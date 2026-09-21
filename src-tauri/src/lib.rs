@@ -1445,16 +1445,35 @@ async fn execute_mssql_query(
     let mut client = connect_mssql(preset).await?;
 
     if is_row_query {
-        let stream = client
+        let mut stream = client
             .simple_query(sql)
             .await
             .map_err(|err| format!("Failed to execute query: {}", err))?;
+
+        // Peek the result metadata before consuming rows. Without this an
+        // empty result set carries no column names and renders as a blank
+        // panel, which is indistinguishable from a failed query.
+        let metadata_columns = stream
+            .columns()
+            .await
+            .map_err(|err| format!("Failed to read result metadata: {}", err))?
+            .map(|columns| {
+                columns
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         let rows = stream
             .into_first_result()
             .await
             .map_err(|err| format!("Failed to read query results: {}", err))?;
 
-        let (columns, values) = mssql_rows_to_grid(&rows);
+        let (mut columns, values) = mssql_rows_to_grid(&rows);
+        if columns.is_empty() {
+            columns = metadata_columns;
+        }
 
         return Ok(SqlQueryResult {
             connection_id: connection_id.to_string(),
