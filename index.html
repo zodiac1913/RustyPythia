@@ -32,7 +32,6 @@
                   <option value="internal">Internal workspace database</option>
                 </select>
                 <button type="button" id="toggle-favorite-database" class="favorite-toggle btn btn-sm btn-outline-secondary" aria-label="Set as default" title="Set as default">★</button>
-                <button type="button" id="add-database-button" class="add-database-button btn btn-sm btn-outline-secondary" aria-label="Add external connection" title="Add external connection">+</button>
               </div>
             </div>
 
@@ -55,7 +54,7 @@
               </div>
               <textarea
                 id="sql-editor"
-                rows="10"
+                rows="4"
                 placeholder="SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
                 spellcheck="false"
               ></textarea>
@@ -75,8 +74,8 @@
                 <div id="squerrl-picker-options" class="squerrl-picker__options"></div>
               </section>
               <div class="sql-editor-form__actions">
-                <button type="button" id="run-sql-button">Run SQL</button>
-                <button type="button" id="clear-sql-button">Clear</button>
+                <button type="button" id="run-sql-button" title="Run the current query (F5)">Run SQL [F5]</button>
+                <button type="button" id="clear-sql-button" title="Clear the editor and results (F8)">Clear [F8]</button>
                 <span class="launcher-actions__hint">Queries run directly against the current database target when supported.</span>
               </div>
             </form>
@@ -90,57 +89,63 @@
                 <p class="sql-results-output__empty">Run a query to see rows or statement results here.</p>
               </div>
             </div>
+
+            <p id="launcher-msg" aria-live="polite"></p>
           </section>
 
 
-          <section class="info-card" aria-labelledby="launch-tools-title">
-            <form class="launcher-form" id="launcher-form">
-              <div class="workspace-shell__heading workspace-shell__heading--compact">
-                <h2 id="launch-tools-title">External SQL App Launch</h2>
-                <p>
-                  Open a separate SQL app only when you want that surface.
-                </p>
-              </div>
-              <label for="launcher-url">SQL app URL to open</label>
+          <section class="info-card info-card--inline" aria-labelledby="launch-tools-title">
+            <form class="launcher-form launcher-form--inline" id="launcher-form">
+              <h2
+                id="launch-tools-title"
+                class="launcher-form__title"
+                title="Open a separate SQL app in a Tauri window or your browser. This is secondary to the SQL workspace above."
+              >
+                External Additional App
+              </h2>
+              <label class="visually-hidden" for="launcher-url">SQL app URL to open</label>
               <input
                 id="launcher-url"
                 type="url"
                 inputmode="url"
                 placeholder="https://sql-app.example"
+                title="URL of the external SQL app to open. A saved connection can fill this in for you."
                 autocomplete="off"
                 spellcheck="false"
               />
-              <div class="launcher-actions">
-                <div class="launcher-menu">
-                  <button
-                    type="button"
-                    id="launch-menu-button"
-                    aria-haspopup="menu"
-                    aria-expanded="false"
-                    aria-controls="launch-menu"
-                  >
-                    Launch SQL App
-                  </button>
-                  <div class="launch-menu" id="launch-menu" role="menu" hidden>
-                    <button type="submit" role="menuitem" id="open-tauri-button">
-                      Open in Tauri Window
-                    </button>
-                    <button type="button" role="menuitem" id="open-browser-button">
-                      Open in Browser
-                    </button>
-                  </div>
-                </div>
-                <span class="launcher-actions__hint"
-                  >This URL stands on its own; a saved connection can optionally
-                  fill it in.</span
+              <div class="launcher-menu">
+                <button
+                  type="button"
+                  id="launch-menu-button"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="launch-menu"
+                  title="Choose where to open the SQL app URL"
                 >
+                  Launch SQL App
+                </button>
+                <div class="launch-menu" id="launch-menu" role="menu" hidden>
+                  <button type="submit" role="menuitem" id="open-tauri-button">
+                    Open in Tauri Window
+                  </button>
+                  <button type="button" role="menuitem" id="open-browser-button">
+                    Open in Browser
+                  </button>
+                </div>
               </div>
+              <button
+                type="button"
+                id="launch-help-button"
+                class="launcher-help"
+                title="What is this for?"
+                aria-label="What is External Additional App for?"
+              >
+                ?
+              </button>
             </form>
-            <p class="section-note">
-              This launcher is secondary. The main landing surface is the SQL
-              workspace above.
-            </p>
-            <p id="launcher-msg" aria-live="polite"></p>
+            <button type="button" class="footer-link" id="footer-browser-link">
+              Prefer a browser session? Open the web version.
+            </button>
           </section>
         </div>
 
@@ -148,10 +153,6 @@
       </section>
 
       <footer class="app-shell__footer">
-        <button type="button" class="footer-link" id="footer-browser-link">
-          Prefer a browser session? Open the web version.
-        </button>
-
         <div class="resource-links" aria-label="Rusty Pythia resources">
           <a href="https://tauri.app" target="_blank" rel="noopener noreferrer">
             Tauri
@@ -169,6 +170,27 @@
         </div>
       </footer>
     </main>
+
+    <dialog id="launcher-help-modal" class="launcher-modal" aria-labelledby="launcher-help-title">
+      <div class="launcher-modal__body">
+        <div class="preset-list__header">
+          <h2 id="launcher-help-title">About External Additional App</h2>
+          <button type="button" class="footer-link" id="close-launcher-help-button">Close</button>
+        </div>
+
+        <p class="section-note">
+          This launcher is secondary; the SQL workspace above is the main surface. Use it
+          to open a completely separate SQL app in its own window, which is handy when you
+          want a second tool side by side with Rusty Pythia.
+        </p>
+        <p class="section-note">
+          Enter the app's full <code>http://</code> or <code>https://</code> URL, then pick
+          <strong>Open in Tauri Window</strong> for a native window or
+          <strong>Open in Browser</strong> for your default browser. The URL stands on its
+          own, though a saved connection can optionally fill it in for you.
+        </p>
+      </div>
+    </dialog>
 
     <dialog id="connection-modal" class="connection-modal" aria-labelledby="connection-modal-title">
       <form class="preset-form connection-modal__form" id="preset-form" method="dialog">
@@ -230,12 +252,38 @@
         </div>
 
         <label for="preset-password">Password</label>
-        <input id="preset-password" type="password" placeholder="Stored locally by Rusty Pythia" />
+        <input id="preset-password" type="password" placeholder="Stored in your OS keychain, never on disk" />
 
         <div class="preset-form__actions">
           <button type="submit" id="save-preset-button">Save Connection</button>
           <button type="button" id="test-preset-button">Test Connection</button>
           <button type="button" id="reset-preset-button">New Connection</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="password-renewal-modal" class="connection-modal" aria-labelledby="password-renewal-title">
+      <form class="preset-form connection-modal__form" id="password-renewal-form" method="dialog">
+        <div class="preset-list__header">
+          <h2 id="password-renewal-title">Renew Database Password</h2>
+          <button type="button" class="footer-link" id="close-password-renewal-button">Cancel</button>
+        </div>
+
+        <p id="password-renewal-message">
+          SQL Server requires a new password before this connection can continue.
+        </p>
+
+        <label for="password-renewal-old">Old password</label>
+        <input id="password-renewal-old" type="password" autocomplete="current-password" required />
+
+        <label for="password-renewal-new">New password</label>
+        <input id="password-renewal-new" type="password" autocomplete="new-password" required />
+
+        <label for="password-renewal-verify">Verify new password</label>
+        <input id="password-renewal-verify" type="password" autocomplete="new-password" required />
+
+        <div class="preset-form__actions">
+          <button type="submit" id="renew-password-button">Renew Password</button>
         </div>
       </form>
     </dialog>

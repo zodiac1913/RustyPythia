@@ -1,15 +1,22 @@
+use keyring::Entry as KeyringEntry;
 use postgres::{Client as PostgresClient, Config as PostgresConfig, NoTls};
 use rusqlite::types::ValueRef;
 use rusqlite::Connection as SqliteConnection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::webview::{NewWindowFeatures, NewWindowResponse, WebviewWindow};
 use tauri::window::Color;
-use tiberius::{AuthMethod, Client as TiberiusClient, Config as TiberiusConfig, EncryptionLevel};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
+use tiberius::{
+    AuthMethod, Client as TiberiusClient, ColumnData, Config as TiberiusConfig, EncryptionLevel,
+    Row as TiberiusRow,
+};
 use tokio::net::TcpStream;
+use tokio_util::compat::Compat;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +30,14 @@ struct ConnectionPreset {
     port: String,
     database: String,
     username: String,
+    // Never persisted to disk; it is held in the OS keychain and only travels
+    // in-memory between the UI and a live connection attempt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     password: String,
+    // Tells the UI a keychain secret exists without revealing it, so saving an
+    // untouched form does not wipe the stored password.
+    #[serde(default)]
+    has_stored_password: bool,
     auth_mode: String,
     domain: String,
 }
@@ -40,6 +54,8 @@ struct PresetStore {
 struct ConnectionTestResult {
     engine: String,
     summary: String,
+    password_days_remaining: Option<i32>,
+    password_renewal_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +169,127 @@ impl ConnectionPreset {
             .parse::<u16>()
             .map_err(|_| format!("Invalid port '{}'", self.port.trim()))
     }
+}
+
+const KEYRING_SERVICE: &str = "com.rustypythia.connections";
+
+fn keyring_entry(connection_id: &str) -> Result<KeyringEntry, String> {
+    KeyringEntry::new(KEYRING_SERVICE, connection_id).map_err(|err| {
+        format!(
+            "Failed to open the OS keychain for {}: {}",
+            connection_id, err
+        )
+    })
+}
+
+/// Secrets already unlocked during this run. Connecting per query would
+/// otherwise hit the OS keychain every time, which prompts the user on each
+/// query because dev builds are ad-hoc signed and never keep an allow grant.
+static PASSWORD_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn password_cache() -> &'static Mutex<HashMap<String, String>> {
+    PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_password(connection_id: &str) -> Option<String> {
+    password_cache().lock().ok()?.get(connection_id).cloned()
+}
+
+fn cache_password(connection_id: &str, password: &str) {
+    if let Ok(mut cache) = password_cache().lock() {
+        cache.insert(connection_id.to_string(), password.to_string());
+    }
+}
+
+fn forget_cached_password(connection_id: &str) {
+    if let Ok(mut cache) = password_cache().lock() {
+        cache.remove(connection_id);
+    }
+}
+
+fn read_connection_password(connection_id: &str) -> Result<Option<String>, String> {
+    match keyring_entry(connection_id)?.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(format!(
+            "Failed to read the stored password for {}: {}",
+            connection_id, err
+        )),
+    }
+}
+
+fn write_connection_password(connection_id: &str, password: &str) -> Result<(), String> {
+    keyring_entry(connection_id)?
+        .set_password(password)
+        .map_err(|err| {
+            format!(
+                "Failed to store the password for {} in the OS keychain: {}",
+                connection_id, err
+            )
+        })?;
+
+    cache_password(connection_id, password);
+    Ok(())
+}
+
+fn delete_connection_password(connection_id: &str) -> Result<(), String> {
+    forget_cached_password(connection_id);
+    match keyring_entry(connection_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(format!(
+            "Failed to remove the stored password for {}: {}",
+            connection_id, err
+        )),
+    }
+}
+
+/// Writes the preset file. Callers must clear passwords first; `password` is
+/// skipped when empty so secrets never reach the disk.
+fn persist_preset_store_file(store_path: &PathBuf, store: &PresetStore) -> Result<(), String> {
+    let payload = serde_json::to_string_pretty(store)
+        .map_err(|err| format!("Failed to serialize preset store: {}", err))?;
+
+    fs::write(store_path, payload)
+        .map_err(|err| format!("Failed to write preset store: {}", err))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(store_path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| format!("Failed to restrict preset store permissions: {}", err))?;
+    }
+
+    Ok(())
+}
+
+/// Resolves the password to use for a live connection: an explicitly supplied
+/// one wins, then the in-memory cache, and only then the OS keychain.
+fn resolve_preset_password(preset: &ConnectionPreset) -> Result<String, String> {
+    if !preset.password.is_empty() {
+        return Ok(preset.password.clone());
+    }
+
+    if let Some(cached) = cached_password(&preset.id) {
+        return Ok(cached);
+    }
+
+    let password = read_connection_password(&preset.id)?.unwrap_or_default();
+
+    // The preset file tracks whether a secret should exist. If it claims one
+    // but the keychain has nothing, connecting would silently send an empty
+    // password and surface as a confusing "login failed" from the server.
+    if password.is_empty() && preset.has_stored_password {
+        return Err(format!(
+            "No saved password found for {}. Open the connection and enter the password again.",
+            preset.name
+        ));
+    }
+
+    if !password.is_empty() {
+        cache_password(&preset.id, &password);
+    }
+
+    Ok(password)
 }
 
 fn preset_store_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -467,14 +604,22 @@ fn normalize_connection_id(connection_id: Option<&str>) -> &str {
         .unwrap_or(INTERNAL_CONNECTION_ID)
 }
 
-fn ensure_connection_exists(connection: &SqliteConnection, connection_id: &str) -> Result<(), String> {
+fn ensure_connection_exists(
+    connection: &SqliteConnection,
+    connection_id: &str,
+) -> Result<(), String> {
     let exists = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM connection_catalog WHERE connection_id = ?1)",
             [connection_id],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|err| format!("Failed to validate connection scope {}: {}", connection_id, err))?;
+        .map_err(|err| {
+            format!(
+                "Failed to validate connection scope {}: {}",
+                connection_id, err
+            )
+        })?;
 
     if exists == 0 {
         return Err(format!("Unknown database target '{}'.", connection_id));
@@ -493,50 +638,85 @@ fn sqlite_value_to_string(value: ValueRef<'_>) -> String {
     }
 }
 
-fn resolve_sqlite_query_target(
-    app: &AppHandle,
-    connection_id: &str,
-) -> Result<(PathBuf, String), String> {
+/// A connection resolved to something the query and schema commands can drive.
+enum QueryTarget {
+    Sqlite {
+        path: PathBuf,
+        label: String,
+    },
+    Mssql {
+        preset: Box<ConnectionPreset>,
+        label: String,
+    },
+}
+
+fn read_preset_by_id(app: &AppHandle, connection_id: &str) -> Result<ConnectionPreset, String> {
+    let store_path = preset_store_path(app)?;
+    let raw = fs::read_to_string(&store_path)
+        .map_err(|err| format!("Failed to read preset store: {}", err))?;
+    let store = serde_json::from_str::<PresetStore>(&raw)
+        .map_err(|err| format!("Failed to parse preset store: {}", err))?;
+
+    store
+        .presets
+        .into_iter()
+        .find(|preset| preset.id == connection_id)
+        .ok_or_else(|| format!("No saved connection preset matches {}.", connection_id))
+}
+
+fn resolve_query_target(app: &AppHandle, connection_id: &str) -> Result<QueryTarget, String> {
     if connection_id == INTERNAL_CONNECTION_ID {
-        return Ok((workspace_database_path(app)?, "Internal workspace database".into()));
+        return Ok(QueryTarget::Sqlite {
+            path: workspace_database_path(app)?,
+            label: "Internal workspace database".into(),
+        });
     }
 
     let workspace_connection = open_workspace_database(app)?;
     ensure_connection_exists(&workspace_connection, connection_id)?;
 
-    let (display_name, engine, host, database_name): (String, String, String, String) = workspace_connection
-        .query_row(
-            "
+    let (display_name, engine, host, database_name): (String, String, String, String) =
+        workspace_connection
+            .query_row(
+                "
             SELECT display_name, engine, host, database_name
             FROM connection_catalog
             WHERE connection_id = ?1
             ",
-            [connection_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|err| format!("Failed to load database target {}: {}", connection_id, err))?;
+                [connection_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|err| format!("Failed to load database target {}: {}", connection_id, err))?;
 
-    if engine != "sqlite" {
-        return Err(format!(
-            "Direct query execution is currently available for the internal workspace database and SQLite targets. '{}' uses {}.",
-            display_name, engine
-        ));
+    match engine.as_str() {
+        "sqlite" => {
+            let path = if !host.trim().is_empty() {
+                host.trim().to_string()
+            } else {
+                database_name.trim().to_string()
+            };
+
+            if path.is_empty() {
+                return Err(format!(
+                    "SQLite target '{}' needs a file path in Host or Default database before it can open a SQL interface.",
+                    display_name
+                ));
+            }
+
+            Ok(QueryTarget::Sqlite {
+                path: PathBuf::from(path),
+                label: display_name,
+            })
+        }
+        "mssql" => Ok(QueryTarget::Mssql {
+            preset: Box::new(read_preset_by_id(app, connection_id)?),
+            label: display_name,
+        }),
+        other => Err(format!(
+            "Direct query execution is currently available for the internal workspace database, SQLite, and MSSQL targets. '{}' uses {}.",
+            display_name, other
+        )),
     }
-
-    let path = if !host.trim().is_empty() {
-        host.trim().to_string()
-    } else {
-        database_name.trim().to_string()
-    };
-
-    if path.is_empty() {
-        return Err(format!(
-            "SQLite target '{}' needs a file path in Host or Default database before it can open a SQL interface.",
-            display_name
-        ));
-    }
-
-    Ok((PathBuf::from(path), display_name))
 }
 
 #[tauri::command]
@@ -689,93 +869,112 @@ fn load_sql_memory(
 }
 
 #[tauri::command]
-fn execute_sql_query(
+async fn execute_sql_query(
     app: AppHandle,
     connection_id: Option<String>,
     sql: String,
 ) -> Result<SqlQueryResult, String> {
-    let normalized_sql = sql.trim();
+    let sql = sql.trim().to_string();
+    let normalized_sql = sql.as_str();
     if normalized_sql.is_empty() {
         return Err("SQL query cannot be empty.".into());
     }
 
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
-    let execution_result = (|| -> Result<SqlQueryResult, String> {
-        let (target_path, connection_label) = resolve_sqlite_query_target(&app, &connection_id)?;
-        let connection = SqliteConnection::open(&target_path).map_err(|err| {
-            format!(
-                "Failed to open SQLite target {} at {}: {}",
-                connection_label,
-                target_path.display(),
-                err
+
+    let query_prefix = normalized_sql
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let is_row_query = matches!(
+        query_prefix.as_str(),
+        "select" | "with" | "pragma" | "explain" | "show"
+    );
+
+    let target = resolve_query_target(&app, &connection_id);
+
+    let execution_result = match target {
+        Err(err) => Err(err),
+        Ok(QueryTarget::Mssql { preset, label }) => {
+            execute_mssql_query(
+                &preset,
+                &connection_id,
+                &label,
+                normalized_sql,
+                is_row_query,
             )
-        })?;
+            .await
+        }
+        Ok(QueryTarget::Sqlite {
+            path: target_path,
+            label: connection_label,
+        }) => (|| -> Result<SqlQueryResult, String> {
+            let connection = SqliteConnection::open(&target_path).map_err(|err| {
+                format!(
+                    "Failed to open SQLite target {} at {}: {}",
+                    connection_label,
+                    target_path.display(),
+                    err
+                )
+            })?;
 
-        let query_prefix = normalized_sql
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let is_row_query = matches!(
-            query_prefix.as_str(),
-            "select" | "with" | "pragma" | "explain"
-        );
+            if is_row_query {
+                let mut statement = connection
+                    .prepare(normalized_sql)
+                    .map_err(|err| format!("Failed to prepare query: {}", err))?;
+                let column_count = statement.column_count();
+                let columns = statement
+                    .column_names()
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                let rows = statement
+                    .query_map([], |row| {
+                        let mut values = Vec::with_capacity(column_count);
+                        for index in 0..column_count {
+                            values.push(sqlite_value_to_string(row.get_ref(index)?));
+                        }
+                        Ok(values)
+                    })
+                    .map_err(|err| format!("Failed to execute query: {}", err))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| format!("Failed to read query results: {}", err))?;
 
-        if is_row_query {
-            let mut statement = connection
-                .prepare(normalized_sql)
-                .map_err(|err| format!("Failed to prepare query: {}", err))?;
-            let column_count = statement.column_count();
-            let columns = statement
-                .column_names()
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect::<Vec<_>>();
-            let rows = statement
-                .query_map([], |row| {
-                    let mut values = Vec::with_capacity(column_count);
-                    for index in 0..column_count {
-                        values.push(sqlite_value_to_string(row.get_ref(index)?));
-                    }
-                    Ok(values)
-                })
-                .map_err(|err| format!("Failed to execute query: {}", err))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| format!("Failed to read query results: {}", err))?;
+                return Ok(SqlQueryResult {
+                    connection_id: connection_id.clone(),
+                    connection_label: connection_label.clone(),
+                    rows_affected: rows.len(),
+                    message: format!(
+                        "Loaded {} row{} from {}.",
+                        rows.len(),
+                        if rows.len() == 1 { "" } else { "s" },
+                        connection_label
+                    ),
+                    columns,
+                    rows,
+                });
+            }
 
-            return Ok(SqlQueryResult {
+            let rows_affected = connection
+                .execute(normalized_sql, [])
+                .map_err(|err| format!("Failed to execute statement: {}", err))?;
+
+            Ok(SqlQueryResult {
                 connection_id: connection_id.clone(),
                 connection_label: connection_label.clone(),
-                rows_affected: rows.len(),
-                message: format!(
-                    "Loaded {} row{} from {}.",
-                    rows.len(),
-                    if rows.len() == 1 { "" } else { "s" },
-                    connection_label
-                ),
-                columns,
-                rows,
-            });
-        }
-
-        let rows_affected = connection
-            .execute(normalized_sql, [])
-            .map_err(|err| format!("Failed to execute statement: {}", err))?;
-
-        Ok(SqlQueryResult {
-            connection_id: connection_id.clone(),
-            connection_label: connection_label.clone(),
-            columns: Vec::new(),
-            rows: Vec::new(),
-            rows_affected,
-            message: format!(
-                "Executed statement against {}. {} row{} affected.",
-                connection_label,
+                columns: Vec::new(),
+                rows: Vec::new(),
                 rows_affected,
-                if rows_affected == 1 { "" } else { "s" }
-            ),
-        })
-    })();
+                message: format!(
+                    "Executed statement against {}. {} row{} affected.",
+                    connection_label,
+                    rows_affected,
+                    if rows_affected == 1 { "" } else { "s" }
+                ),
+            })
+        })(),
+    };
 
     match &execution_result {
         Ok(result) => write_app_log(
@@ -803,12 +1002,27 @@ fn execute_sql_query(
 }
 
 #[tauri::command]
-fn load_sql_schema(
+async fn load_sql_schema(
     app: AppHandle,
     connection_id: Option<String>,
 ) -> Result<Vec<SqlSchemaTable>, String> {
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
-    let (target_path, _) = resolve_sqlite_query_target(&app, &connection_id)?;
+    let target_path = match resolve_query_target(&app, &connection_id)? {
+        QueryTarget::Sqlite { path, .. } => path,
+        QueryTarget::Mssql { preset, .. } => {
+            let tables = load_mssql_schema(&preset).await?;
+            write_app_log(
+                &app,
+                "schema.load",
+                &format!(
+                    "Loaded schema for {} with {} table(s)",
+                    connection_id,
+                    tables.len()
+                ),
+            );
+            return Ok(tables);
+        }
+    };
     let connection = SqliteConnection::open(&target_path).map_err(|err| {
         format!(
             "Failed to open schema target at {}: {}",
@@ -918,7 +1132,11 @@ fn load_app_log(app: AppHandle, limit: Option<u32>) -> Result<Vec<AppLogEntry>, 
 fn load_workspace_database_info(app: AppHandle) -> Result<WorkspaceDatabaseInfo, String> {
     let result = ensure_workspace_database(&app);
     if let Ok(info) = &result {
-        write_app_log(&app, "workspace.info", &format!("Loaded workspace database info for {}", info.path));
+        write_app_log(
+            &app,
+            "workspace.info",
+            &format!("Loaded workspace database info for {}", info.path),
+        );
     }
     result
 }
@@ -937,15 +1155,44 @@ fn load_preset_store(app: AppHandle) -> Result<PresetStore, String> {
             )
         })?;
         sync_workspace_connection_catalog(&connection, &store)?;
-        write_app_log(&app, "preset.load", "Loaded empty preset store and synced internal connection catalog");
+        write_app_log(
+            &app,
+            "preset.load",
+            "Loaded empty preset store and synced internal connection catalog",
+        );
         return Ok(store);
     }
 
     let raw = fs::read_to_string(&store_path)
         .map_err(|err| format!("Failed to read preset store: {}", err))?;
 
-    let store = serde_json::from_str::<PresetStore>(&raw)
+    let mut store = serde_json::from_str::<PresetStore>(&raw)
         .map_err(|err| format!("Failed to parse preset store: {}", err))?;
+
+    // Older builds wrote passwords straight into this file. Move any that are
+    // still there into the keychain and rewrite the file without them.
+    let mut migrated = 0_usize;
+    for preset in &mut store.presets {
+        if !preset.password.is_empty() {
+            write_connection_password(&preset.id, &preset.password)?;
+            preset.password.clear();
+            preset.has_stored_password = true;
+            migrated += 1;
+        }
+    }
+
+    if migrated > 0 {
+        persist_preset_store_file(&store_path, &store)?;
+        write_app_log(
+            &app,
+            "preset.migrate",
+            &format!(
+                "Moved {} plaintext password(s) out of the preset file into the OS keychain",
+                migrated
+            ),
+        );
+    }
+
     let workspace_path = workspace_database_path(&app)?;
     let connection = SqliteConnection::open(&workspace_path).map_err(|err| {
         format!(
@@ -966,12 +1213,35 @@ fn load_preset_store(app: AppHandle) -> Result<PresetStore, String> {
 }
 
 #[tauri::command]
-fn save_preset_store(app: AppHandle, store: PresetStore) -> Result<(), String> {
+fn save_preset_store(app: AppHandle, mut store: PresetStore) -> Result<(), String> {
     let store_path = preset_store_path(&app)?;
-    let payload = serde_json::to_string_pretty(&store)
-        .map_err(|err| format!("Failed to serialize preset store: {}", err))?;
 
-    fs::write(&store_path, payload).map_err(|err| format!("Failed to write preset store: {}", err))?;
+    // Route every secret into the keychain before anything touches the disk.
+    for preset in &mut store.presets {
+        if !preset.password.is_empty() {
+            write_connection_password(&preset.id, &preset.password)?;
+            preset.password.clear();
+            preset.has_stored_password = true;
+        } else if !preset.has_stored_password {
+            delete_connection_password(&preset.id)?;
+        }
+    }
+
+    // Drop keychain entries for presets the user deleted.
+    let previous = fs::read_to_string(&store_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PresetStore>(&raw).ok());
+    if let Some(previous) = previous {
+        for stale in previous
+            .presets
+            .iter()
+            .filter(|candidate| !store.presets.iter().any(|preset| preset.id == candidate.id))
+        {
+            delete_connection_password(&stale.id)?;
+        }
+    }
+
+    persist_preset_store_file(&store_path, &store)?;
 
     let workspace_path = workspace_database_path(&app)?;
     let connection = SqliteConnection::open(&workspace_path).map_err(|err| {
@@ -996,9 +1266,14 @@ fn save_preset_store(app: AppHandle, store: PresetStore) -> Result<(), String> {
     Ok(())
 }
 
-async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTestResult, String> {
+async fn connect_mssql(
+    preset: &ConnectionPreset,
+) -> Result<TiberiusClient<Compat<TcpStream>>, String> {
     if preset.auth_mode == "ntlm" {
-        return Err("NTLM connection testing is not implemented in Rusty Pythia yet. Use SQL auth for now.".into());
+        return Err(
+            "NTLM connections are not implemented in Rusty Pythia yet. Use SQL auth for now."
+                .into(),
+        );
     }
 
     let host = preset.host.trim();
@@ -1006,6 +1281,23 @@ async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTe
         return Err("Host is required for MSSQL presets.".into());
     }
 
+    let password = if preset.auth_mode == "none" {
+        String::new()
+    } else {
+        resolve_preset_password(preset)?
+    };
+    connect_mssql_with_password(preset, &password, None).await
+}
+
+async fn connect_mssql_with_password(
+    preset: &ConnectionPreset,
+    password: &str,
+    new_password: Option<&str>,
+) -> Result<TiberiusClient<Compat<TcpStream>>, String> {
+    let host = preset.host.trim();
+    if host.is_empty() {
+        return Err("Host is required for MSSQL presets.".into());
+    }
     let mut config = TiberiusConfig::new();
     config.host(host);
     config.port(preset.normalized_port()?);
@@ -1015,11 +1307,14 @@ async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTe
 
     if preset.auth_mode == "none" {
         config.authentication(AuthMethod::sql_server("", ""));
-    } else {
-        config.authentication(AuthMethod::sql_server(
+    } else if let Some(new_password) = new_password {
+        config.authentication(AuthMethod::sql_server_with_password_change(
             preset.username.trim(),
-            preset.password.as_str(),
+            password,
+            new_password,
         ));
+    } else {
+        config.authentication(AuthMethod::sql_server(preset.username.trim(), password));
     }
 
     config.encryption(EncryptionLevel::Required);
@@ -1031,9 +1326,213 @@ async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTe
     tcp.set_nodelay(true)
         .map_err(|err| format!("Failed to configure MSSQL socket: {}", err))?;
 
-    let _client = TiberiusClient::connect(config, tcp.compat_write())
+    TiberiusClient::connect(config, tcp.compat_write())
         .await
-        .map_err(|err| format!("MSSQL login failed for {}: {}", host, err))?;
+        .map_err(|err| match err.code() {
+            Some(18487 | 18488) => format!(
+                "PASSWORD_RENEWAL_REQUIRED:Your SQL Server password must be changed before connecting to {}.",
+                host
+            ),
+            _ => format!("MSSQL login failed for {}: {}", host, err),
+        })
+}
+
+async fn mssql_password_status(
+    client: &mut TiberiusClient<Compat<TcpStream>>,
+) -> Result<(Option<i32>, bool), String> {
+    let row = client
+        .simple_query(
+            "SELECT \
+             CAST(LOGINPROPERTY(SUSER_SNAME(), 'DaysUntilExpiration') AS int), \
+             CAST(LOGINPROPERTY(SUSER_SNAME(), 'IsExpired') AS int), \
+             CAST(LOGINPROPERTY(SUSER_SNAME(), 'IsMustChange') AS int)",
+        )
+        .await
+        .map_err(|err| format!("Failed to check MSSQL password status: {}", err))?
+        .into_row()
+        .await
+        .map_err(|err| format!("Failed to read MSSQL password status: {}", err))?;
+
+    let Some(row) = row else {
+        return Ok((None, false));
+    };
+    let days = row.get::<i32, _>(0);
+    let renewal_required =
+        row.get::<i32, _>(1).unwrap_or(0) == 1 || row.get::<i32, _>(2).unwrap_or(0) == 1;
+    Ok((days, renewal_required))
+}
+
+/// Renders one MSSQL cell as display text. Temporal columns are read back
+/// through chrono so they format as timestamps instead of raw TDS structs.
+fn mssql_cell_to_string(row: &TiberiusRow, index: usize, value: &ColumnData<'static>) -> String {
+    fn scalar<T: ToString>(value: &Option<T>) -> String {
+        value.as_ref().map(ToString::to_string).unwrap_or_default()
+    }
+
+    fn temporal<T: ToString>(row: &TiberiusRow, index: usize) -> String
+    where
+        T: for<'a> tiberius::FromSql<'a>,
+    {
+        row.try_get::<T, _>(index)
+            .ok()
+            .flatten()
+            .map(|parsed| parsed.to_string())
+            .unwrap_or_default()
+    }
+
+    match value {
+        ColumnData::U8(inner) => scalar(inner),
+        ColumnData::I16(inner) => scalar(inner),
+        ColumnData::I32(inner) => scalar(inner),
+        ColumnData::I64(inner) => scalar(inner),
+        ColumnData::F32(inner) => scalar(inner),
+        ColumnData::F64(inner) => scalar(inner),
+        ColumnData::Bit(inner) => scalar(inner),
+        ColumnData::Guid(inner) => scalar(inner),
+        ColumnData::Numeric(inner) => scalar(inner),
+        ColumnData::String(inner) => inner
+            .as_ref()
+            .map(|text| text.to_string())
+            .unwrap_or_default(),
+        ColumnData::Xml(inner) => inner
+            .as_ref()
+            .map(|xml| xml.to_string())
+            .unwrap_or_default(),
+        ColumnData::Binary(inner) => inner
+            .as_ref()
+            .map(|bytes| format!("<{} bytes>", bytes.len()))
+            .unwrap_or_default(),
+        ColumnData::Date(_) => temporal::<chrono::NaiveDate>(row, index),
+        ColumnData::Time(_) => temporal::<chrono::NaiveTime>(row, index),
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            temporal::<chrono::NaiveDateTime>(row, index)
+        }
+        ColumnData::DateTimeOffset(_) => temporal::<chrono::DateTime<chrono::Utc>>(row, index),
+    }
+}
+
+fn mssql_rows_to_grid(rows: &[TiberiusRow]) -> (Vec<String>, Vec<Vec<String>>) {
+    let columns = rows
+        .first()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let values = rows
+        .iter()
+        .map(|row| {
+            row.cells()
+                .enumerate()
+                .map(|(index, (_, value))| mssql_cell_to_string(row, index, value))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    (columns, values)
+}
+
+async fn execute_mssql_query(
+    preset: &ConnectionPreset,
+    connection_id: &str,
+    connection_label: &str,
+    sql: &str,
+    is_row_query: bool,
+) -> Result<SqlQueryResult, String> {
+    let mut client = connect_mssql(preset).await?;
+
+    if is_row_query {
+        let stream = client
+            .simple_query(sql)
+            .await
+            .map_err(|err| format!("Failed to execute query: {}", err))?;
+        let rows = stream
+            .into_first_result()
+            .await
+            .map_err(|err| format!("Failed to read query results: {}", err))?;
+
+        let (columns, values) = mssql_rows_to_grid(&rows);
+
+        return Ok(SqlQueryResult {
+            connection_id: connection_id.to_string(),
+            connection_label: connection_label.to_string(),
+            rows_affected: values.len(),
+            message: format!(
+                "Loaded {} row{} from {}.",
+                values.len(),
+                if values.len() == 1 { "" } else { "s" },
+                connection_label
+            ),
+            columns,
+            rows: values,
+        });
+    }
+
+    let outcome = client
+        .execute(sql, &[])
+        .await
+        .map_err(|err| format!("Failed to execute statement: {}", err))?;
+    let rows_affected = outcome.rows_affected().iter().sum::<u64>() as usize;
+
+    Ok(SqlQueryResult {
+        connection_id: connection_id.to_string(),
+        connection_label: connection_label.to_string(),
+        columns: Vec::new(),
+        rows: Vec::new(),
+        rows_affected,
+        message: format!(
+            "Executed statement against {}. {} row{} affected.",
+            connection_label,
+            rows_affected,
+            if rows_affected == 1 { "" } else { "s" }
+        ),
+    })
+}
+
+async fn load_mssql_schema(preset: &ConnectionPreset) -> Result<Vec<SqlSchemaTable>, String> {
+    let mut client = connect_mssql(preset).await?;
+
+    let rows = client
+        .simple_query(
+            "
+            SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+            ",
+        )
+        .await
+        .map_err(|err| format!("Failed to query MSSQL schema: {}", err))?
+        .into_first_result()
+        .await
+        .map_err(|err| format!("Failed to read MSSQL schema rows: {}", err))?;
+
+    let mut tables: Vec<SqlSchemaTable> = Vec::new();
+    for row in &rows {
+        let schema_name = row.get::<&str, _>(0).unwrap_or_default();
+        let table_name = row.get::<&str, _>(1).unwrap_or_default();
+        let column_name = row.get::<&str, _>(2).unwrap_or_default().to_string();
+        let qualified_name = format!("{}.{}", schema_name, table_name);
+
+        match tables.last_mut() {
+            Some(table) if table.name == qualified_name => table.fields.push(column_name),
+            _ => tables.push(SqlSchemaTable {
+                name: qualified_name,
+                fields: vec![column_name],
+            }),
+        }
+    }
+
+    Ok(tables)
+}
+
+async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTestResult, String> {
+    let host = preset.host.trim();
+    let mut client = connect_mssql(preset).await?;
+    let (password_days_remaining, password_renewal_required) =
+        mssql_password_status(&mut client).await?;
 
     let database_suffix = if preset.database.trim().is_empty() {
         String::new()
@@ -1041,9 +1540,23 @@ async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTe
         format!(" / {}", preset.database.trim())
     };
 
+    let expiry_suffix = match password_days_remaining {
+        Some(days) if days <= 14 => format!(
+            ". Password expires in {} day{}",
+            days,
+            if days == 1 { "" } else { "s" }
+        ),
+        _ => String::new(),
+    };
+
     Ok(ConnectionTestResult {
         engine: "mssql".into(),
-        summary: format!("Connected to MSSQL {}{}", host, database_suffix),
+        summary: format!(
+            "Connected to MSSQL {}{}{}",
+            host, database_suffix, expiry_suffix
+        ),
+        password_days_remaining,
+        password_renewal_required,
     })
 }
 
@@ -1060,8 +1573,9 @@ fn test_postgres_connection(preset: &ConnectionPreset) -> Result<ConnectionTestR
     if !preset.username.trim().is_empty() {
         config.user(preset.username.trim());
     }
-    if !preset.password.is_empty() {
-        config.password(preset.password.as_str());
+    let password = resolve_preset_password(preset)?;
+    if !password.is_empty() {
+        config.password(password.as_str());
     }
     if !preset.database.trim().is_empty() {
         config.dbname(preset.database.trim());
@@ -1080,6 +1594,8 @@ fn test_postgres_connection(preset: &ConnectionPreset) -> Result<ConnectionTestR
     Ok(ConnectionTestResult {
         engine: "postgres".into(),
         summary: format!("Connected to Postgres {}{}", host, database_suffix),
+        password_days_remaining: None,
+        password_renewal_required: false,
     })
 }
 
@@ -1100,11 +1616,59 @@ fn test_sqlite_connection(preset: &ConnectionPreset) -> Result<ConnectionTestRes
     Ok(ConnectionTestResult {
         engine: "sqlite".into(),
         summary: format!("Opened SQLite database {}", path),
+        password_days_remaining: None,
+        password_renewal_required: false,
     })
 }
 
 #[tauri::command]
-async fn test_connection(app: AppHandle, preset: ConnectionPreset) -> Result<ConnectionTestResult, String> {
+async fn renew_mssql_password(
+    app: AppHandle,
+    connection_id: String,
+    old_password: String,
+    new_password: String,
+) -> Result<ConnectionTestResult, String> {
+    if old_password.is_empty() {
+        return Err("Old password is required.".into());
+    }
+    if new_password.is_empty() {
+        return Err("New password is required.".into());
+    }
+    if old_password == new_password {
+        return Err("New password must differ from the old password.".into());
+    }
+
+    let preset = read_preset_by_id(&app, &connection_id)?;
+    if preset.engine != "mssql" || preset.auth_mode != "sql" {
+        return Err("Password renewal is available only for MSSQL SQL-auth connections.".into());
+    }
+
+    let mut client =
+        connect_mssql_with_password(&preset, &old_password, Some(&new_password)).await?;
+    write_connection_password(&preset.id, &new_password)?;
+    let (password_days_remaining, password_renewal_required) = mssql_password_status(&mut client)
+        .await
+        .unwrap_or((None, false));
+
+    write_app_log(
+        &app,
+        "connection.password-renewed",
+        &format!("Renewed MSSQL password for {}", preset.name),
+    );
+
+    Ok(ConnectionTestResult {
+        engine: "mssql".into(),
+        summary: format!("Password renewed. Connected to {}.", preset.name),
+        password_days_remaining,
+        password_renewal_required,
+    })
+}
+
+#[tauri::command]
+async fn test_connection(
+    app: AppHandle,
+    preset: ConnectionPreset,
+) -> Result<ConnectionTestResult, String> {
     let result = match preset.engine.as_str() {
         "mssql" => test_mssql_connection(&preset).await,
         "postgres" => test_postgres_connection(&preset),
@@ -1116,7 +1680,10 @@ async fn test_connection(app: AppHandle, preset: ConnectionPreset) -> Result<Con
         Ok(summary) => write_app_log(
             &app,
             "connection.test",
-            &format!("Connection test succeeded for {}: {}", preset.name, summary.summary),
+            &format!(
+                "Connection test succeeded for {}: {}",
+                preset.name, summary.summary
+            ),
         ),
         Err(err) => write_app_log(
             &app,
@@ -1177,8 +1744,16 @@ fn build_sql_window(app: &AppHandle, target_url: &str) -> Result<(), String> {
 fn open_sql_window(app: AppHandle, url: String) -> Result<(), String> {
     let result = build_sql_window(&app, &url);
     match &result {
-        Ok(_) => write_app_log(&app, "window.open", &format!("Opened SQL window for {}", url)),
-        Err(err) => write_app_log(&app, "window.error", &format!("Failed to open SQL window for {}: {}", url, err)),
+        Ok(_) => write_app_log(
+            &app,
+            "window.open",
+            &format!("Opened SQL window for {}", url),
+        ),
+        Err(err) => write_app_log(
+            &app,
+            "window.error",
+            &format!("Failed to open SQL window for {}: {}", url, err),
+        ),
     }
     result
 }
@@ -1227,12 +1802,17 @@ pub fn run() {
             load_workspace_database_info,
             load_preset_store,
             save_preset_store,
-            test_connection
+            test_connection,
+            renew_mssql_password
         ])
         .setup(|app| {
             ensure_workspace_database(&app.handle())?;
             build_internal_window(app)?;
-            write_app_log(&app.handle(), "app.startup", "Rusty Pythia initialized its internal workspace and main window");
+            write_app_log(
+                &app.handle(),
+                "app.startup",
+                "Rusty Pythia initialized its internal workspace and main window",
+            );
             Ok(())
         })
         .build(tauri::generate_context!())

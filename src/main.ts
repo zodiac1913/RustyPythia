@@ -43,7 +43,6 @@ let launchMenuEl: HTMLElement | null;
 let footerBrowserLinkEl: HTMLButtonElement | null;
 let databaseSelectorEl: HTMLSelectElement | null;
 let toggleFavoriteDatabaseEl: HTMLButtonElement | null;
-let addDatabaseButtonEl: HTMLButtonElement | null;
 let workspaceDbPathEl: HTMLElement | null;
 let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
@@ -66,7 +65,8 @@ let squerrlSchemaCacheKey = "";
 let squerrlSchemaCache: SqlSchemaTable[] | null = null;
 let squerrlRequestId = 0;
 let activeQueryLanguage: QueryLanguage | null = null;
-let activeSQuerrlTableName: string | null = null;
+// Only tracks the deliberately-opened condition builder. Table and field
+// progress is derived from the editor text by deriveSQuerrlStage.
 let activeSQuerrlStage: "fields" | "options" | "conditions" | null = null;
 let selectedSQuerrlFields = new Set<string>();
 let squerrlConditionKeyboardController: AbortController | null = null;
@@ -105,6 +105,20 @@ let testPresetButtonEl: HTMLButtonElement | null;
 let resetPresetButtonEl: HTMLButtonElement | null;
 let connectionModalEl: HTMLDialogElement | null;
 let closeConnectionModalButtonEl: HTMLButtonElement | null;
+let passwordRenewalModalEl: HTMLDialogElement | null;
+let passwordRenewalFormEl: HTMLFormElement | null;
+let passwordRenewalMessageEl: HTMLElement | null;
+let passwordRenewalOldEl: HTMLInputElement | null;
+let passwordRenewalNewEl: HTMLInputElement | null;
+let passwordRenewalVerifyEl: HTMLInputElement | null;
+let renewPasswordButtonEl: HTMLButtonElement | null;
+let closePasswordRenewalButtonEl: HTMLButtonElement | null;
+// Which saved connection the renewal dialog is currently rotating. The form
+// under test is not always the active connection, so this cannot be inferred.
+let passwordRenewalTargetId: string | null = null;
+let launcherHelpModalEl: HTMLDialogElement | null;
+let launchHelpButtonEl: HTMLButtonElement | null;
+let closeLauncherHelpButtonEl: HTMLButtonElement | null;
 
 type PresetEngine = "mssql" | "postgres" | "sqlite";
 
@@ -117,7 +131,9 @@ type ConnectionPreset = {
   port: string;
   database: string;
   username: string;
+  // Only ever held in memory on its way to the backend keychain; never persisted here.
   password: string;
+  hasStoredPassword: boolean;
   authMode: "sql" | "ntlm" | "none";
   domain: string;
 };
@@ -130,6 +146,8 @@ type PresetStore = {
 type ConnectionTestResult = {
   engine: string;
   summary: string;
+  passwordDaysRemaining: number | null;
+  passwordRenewalRequired: boolean;
 };
 
 type WorkspaceDatabaseInfo = {
@@ -209,9 +227,18 @@ const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
 };
 
 const SQL_PREFIX_PATTERN = /^\s*(select|with|insert|update|delete|drop|create|alter|pragma|explain)\b/i;
-const SQUERRL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9$]*$/;
+const SQUERRL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+// Table names may carry an optional schema prefix so MSSQL targets like
+// XO.XO_ExecutiveOfficer parse the same as unqualified SQLite tables.
+const SQUERRL_TABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$/;
 
 const INTERNAL_CONNECTION_ID = "__internal_workspace__";
+// Sentinel values for the database dropdown's action entries.
+const EDIT_CONNECTION_ACTION = "__edit_connection__";
+const ADD_CONNECTION_ACTION = "__add_connection__";
+const DELETE_CONNECTION_ACTION = "__delete_connection__";
+// Above this many suggestions the picker opens focused on its filter box.
+const SQUERRL_SEARCH_FOCUS_THRESHOLD = 15;
 const PRESET_STORAGE_KEY = "rusty-pythia.connection-presets";
 const ACTIVE_PRESET_STORAGE_KEY = "rusty-pythia.active-preset";
 const BROWSER_WORKSPACE_DB_KEY = "rusty-pythia.browser-workspace.sqlite";
@@ -497,7 +524,14 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
 
     case "save_preset_store": {
       const store = (args?.store ?? { activePresetId: null, presets: [] }) as PresetStore;
-      window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(store.presets));
+      // Browser mode has no OS keychain, so passwords are kept in memory for this
+      // session only and are never written to localStorage.
+      const sanitizedPresets = store.presets.map((preset) => ({
+        ...preset,
+        password: "",
+        hasStoredPassword: false,
+      }));
+      window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(sanitizedPresets));
       if (store.activePresetId) {
         window.localStorage.setItem(ACTIVE_PRESET_STORAGE_KEY, store.activePresetId);
       } else {
@@ -765,6 +799,13 @@ function quoteSqlIdentifier(identifier: string) {
   return `"${identifier.replace(/"/g, '""')}"`;
 }
 
+function quoteSqlTableName(tableName: string) {
+  return tableName
+    .split(".")
+    .map((part) => quoteSqlIdentifier(part))
+    .join(".");
+}
+
 function normalizeSQuerrlValue(rawValue: string) {
   const value = rawValue.trim();
   if (!value) {
@@ -795,7 +836,7 @@ function parseSQuerrlConditions(segment: string) {
   let remaining = segment.trim();
 
   while (remaining) {
-    const match = /^(has|not)\s+([A-Za-z_][A-Za-z0-9$]*)\s+(contains|!=|>=|<=|=|>|<)\s+([\s\S]+?)(?=(?:\s+(?:has|not)\s+[A-Za-z_][A-Za-z0-9$]*\s+(?:contains|!=|>=|<=|=|>|<)\s+)|$)/i.exec(remaining);
+    const match = /^(has|not)\s+([A-Za-z_][A-Za-z0-9_$]*)\s+(contains|!=|>=|<=|=|>|<)\s+([\s\S]+?)(?=(?:\s+(?:has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s+(?:contains|!=|>=|<=|=|>|<)\s+)|$)/i.exec(remaining);
     if (!match) {
       throw new Error(`Unsupported SQuerL condition segment: ${remaining}`);
     }
@@ -836,16 +877,35 @@ function parseSQuerrlFields(fieldSegment: string) {
   return selectedFields;
 }
 
+// Matches on the full name first, then falls back to comparing bare table
+// names so a schema prefix is optional on either side of the comparison.
+function findSQuerrlSchemaTable(tableName: string) {
+  if (!squerrlSchemaCache) {
+    return undefined;
+  }
+
+  const target = tableName.toLowerCase();
+  const bareTarget = target.split(".").pop() ?? target;
+
+  return (
+    squerrlSchemaCache.find((table) => table.name.toLowerCase() === target) ??
+    squerrlSchemaCache.find((table) => {
+      const name = table.name.toLowerCase();
+      return (name.split(".").pop() ?? name) === bareTarget;
+    })
+  );
+}
+
 function translateSQuerrlToSql(statement: string) {
   const trimmedStatement = normalizeSQuerrlStatement(statement);
   const [tableName] = trimmedStatement.split(/\s+/);
-  if (!SQUERRL_IDENTIFIER_PATTERN.test(tableName ?? "")) {
+  if (!SQUERRL_TABLE_PATTERN.test(tableName ?? "")) {
     throw new Error("SQuerL statements must start with a table name.");
   }
 
   const remainder = trimmedStatement.slice(tableName.length).trim();
   const sortMatch = /(^|\s)(~up|~down)(?=\s|$)/i.exec(remainder);
-  const conditionMatch = /(^|\s)(has|not)\s+[A-Za-z_][A-Za-z0-9$]*\s+(contains|!=|>=|<=|=|>|<)\s+/i.exec(remainder);
+  const conditionMatch = /(^|\s)(has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s+(contains|!=|>=|<=|=|>|<)\s+/i.exec(remainder);
   const sortIndex = sortMatch ? sortMatch.index + sortMatch[1].length : -1;
   const conditionIndex = conditionMatch ? conditionMatch.index + conditionMatch[1].length : -1;
   const fieldSegmentEnd = [sortIndex, conditionIndex]
@@ -873,14 +933,14 @@ function translateSQuerrlToSql(statement: string) {
   const projection = selectedFields.length === 1 && selectedFields[0] === "*"
     ? "*"
     : selectedFields.map((field) => quoteSqlIdentifier(field)).join(", ");
-  const schemaTable = squerrlSchemaCache?.find((table) => table.name.toLowerCase() === tableName.toLowerCase());
+  const schemaTable = findSQuerrlSchemaTable(tableName);
   const orderField = selectedFields.find((field) => field !== "*") ?? schemaTable?.fields[0];
 
   if (sortDirection && !orderField) {
     throw new Error(`SQuerL sort needs at least one sortable field for ${tableName}.`);
   }
 
-  const sqlParts = [`SELECT ${projection}`, `FROM ${quoteSqlIdentifier(tableName)}`];
+  const sqlParts = [`SELECT ${projection}`, `FROM ${quoteSqlTableName(tableName)}`];
   if (conditions.length) {
     sqlParts.push(`WHERE ${conditions.join(" AND ")}`);
   }
@@ -928,6 +988,7 @@ function normalizePreset(preset: Partial<ConnectionPreset>): ConnectionPreset {
     database: typeof preset.database === "string" ? preset.database : "",
     username: typeof preset.username === "string" ? preset.username : "",
     password: typeof preset.password === "string" ? preset.password : "",
+    hasStoredPassword: preset.hasStoredPassword === true,
     authMode,
     domain: typeof preset.domain === "string" ? preset.domain : "",
   };
@@ -1112,6 +1173,43 @@ function closeConnectionModal() {
   connectionModalEl?.close();
 }
 
+function openPasswordRenewalModal(presetId: string | null, message?: string) {
+  const preset = getPresetById(presetId);
+  if (!preset || preset.engine !== "mssql" || preset.authMode !== "sql") {
+    setLauncherMessage(
+      "Password renewal requires a saved MSSQL connection using SQL authentication.",
+      true
+    );
+    return;
+  }
+
+  passwordRenewalTargetId = preset.id;
+
+  if (passwordRenewalMessageEl) {
+    passwordRenewalMessageEl.textContent =
+      message ?? `Renew the password for ${preset.name}.`;
+  }
+  passwordRenewalFormEl?.reset();
+  passwordRenewalModalEl?.showModal();
+  passwordRenewalOldEl?.focus();
+}
+
+function closePasswordRenewalModal() {
+  passwordRenewalTargetId = null;
+  passwordRenewalFormEl?.reset();
+  passwordRenewalModalEl?.close();
+}
+
+function handlePasswordRenewalError(message: string, presetId: string | null) {
+  const marker = "PASSWORD_RENEWAL_REQUIRED:";
+  if (!message.includes(marker)) {
+    return false;
+  }
+
+  openPasswordRenewalModal(presetId, message.split(marker)[1]?.trim());
+  return true;
+}
+
 function openQuerySearchModal() {
   querySearchModalEl?.showModal();
 }
@@ -1224,7 +1322,7 @@ async function loadQueryFromSearch() {
   }
 
   sqlEditorEl.value = queryText;
-  setEditorLanguage(queryLanguage, queryText);
+  setEditorLanguage(queryLanguage);
   closeQuerySearchModal();
   setLauncherMessage("Query loaded from search.");
   return true;
@@ -1368,6 +1466,23 @@ function hideSQuerrlPicker() {
   }
   squerrlTableSearchEl = null;
   squerrlSelectedIndex = 0;
+}
+
+function resetSQuerrlAssistState() {
+  activeQueryLanguage = null;
+  activeSQuerrlStage = null;
+  selectedSQuerrlFields.clear();
+}
+
+// An empty editor means the user is starting over, so drop any half-built
+// statement state and offer the table picker again straight away.
+function reengageSQuerrlAssist() {
+  resetSQuerrlAssistState();
+  hideSQuerrlPicker();
+
+  if (isAssistLanguage(getEffectiveQueryLanguage())) {
+    void maybeShowSQuerrlPicker(true);
+  }
 }
 
 function openSQuerrlSortOverlay() {
@@ -1524,29 +1639,66 @@ function getSQuerrlContext() {
 
   const cursor = sqlEditorEl.selectionStart;
   const beforeCursor = sqlEditorEl.value.slice(0, cursor);
-  const tokenMatch = /[A-Za-z_][A-Za-z0-9$]*$/.exec(beforeCursor);
+  const tokenMatch = /[A-Za-z_][A-Za-z0-9_$]*$/.exec(beforeCursor);
   const prefix = tokenMatch?.[0] ?? "";
   const beforeToken = beforeCursor.slice(0, beforeCursor.length - prefix.length);
   const normalized = beforeToken.toLowerCase();
   const fromMatch = /\bfrom\s+([a-z_][a-z0-9$]*)?$/.exec(normalized);
   const hasFrom = /\bfrom\b/i.test(beforeCursor);
   const hasClause = /\b(where|order\s+by)\b/i.test(beforeCursor);
-  const trigger = Boolean(prefix) || /\s$/.test(beforeCursor);
+  // A trailing comma means another field is expected, so it reopens the picker
+  // just like whitespace does.
+  const trigger = Boolean(prefix) || /[\s,]$/.test(beforeCursor);
   const language = getEffectiveQueryLanguage();
 
   return { cursor, beforeCursor, beforeToken, prefix, fromMatch, hasFrom, hasClause, trigger, language };
+}
+
+// Works out which part of a SQuerL statement the user is on purely from the
+// text, so deleting a section walks the assist back to that section instead of
+// leaving it on whatever stage was reached earlier. Table and fields are
+// required; sort and conditions are optional and only reachable after fields.
+function deriveSQuerrlStage(text: string): {
+  stage: "table" | "fields" | "options";
+  tableName: string | null;
+} {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) {
+    return { stage: "table", tableName: null };
+  }
+
+  // A single token with no trailing space is still being typed.
+  if (tokens.length === 1 && !/\s$/.test(text)) {
+    return { stage: "table", tableName: null };
+  }
+
+  const table = squerrlSchemaCache?.find(
+    (candidate) => candidate.name.toLowerCase() === tokens[0].toLowerCase()
+  );
+  if (!table) {
+    return { stage: "table", tableName: null };
+  }
+
+  const fieldTokens: string[] = [];
+  for (const token of tokens.slice(1)) {
+    if (/^~(up|down)$/i.test(token) || /^(has|not)$/i.test(token)) {
+      break;
+    }
+    fieldTokens.push(token);
+  }
+
+  return {
+    stage: fieldTokens.length ? "options" : "fields",
+    tableName: table.name,
+  };
 }
 
 function getEffectiveQueryLanguage(): QueryLanguage {
   return (queryLanguageEl?.value ?? activeQueryLanguage ?? "squerrl") as QueryLanguage;
 }
 
-function setEditorLanguage(language: QueryLanguage, queryText = "") {
-  const firstToken = queryText.trim().split(/\s+/)[0];
+function setEditorLanguage(language: QueryLanguage) {
   activeQueryLanguage = language;
-  activeSQuerrlTableName = language === "squerrl"
-    ? firstToken || null
-    : null;
   activeSQuerrlStage = null;
   selectedSQuerrlFields.clear();
 
@@ -1580,9 +1732,7 @@ function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
     const selectedTable = squerrlSchemaCache?.find(
       (table) => table.name.toLowerCase() === suggestion.value.trim().toLowerCase()
     );
-    setEditorLanguage(selectedTable ? "squerrl" : "sql", suggestion.value.trim());
-    activeSQuerrlTableName = selectedTable?.name ?? null;
-    activeSQuerrlStage = selectedTable ? "fields" : null;
+    setEditorLanguage(selectedTable ? "squerrl" : "sql");
   }
 
   const insertStart = context.cursor - context.prefix.length;
@@ -1716,7 +1866,7 @@ function renderSQuerrlPicker(
     hideSQuerrlPicker();
     sqlEditorEl?.focus();
   });
-  pickerOptionsEl.setAttribute("aria-label", multiSelect ? "Field choices. Use Space to mark fields, Enter to use marked fields, or Escape to cancel." : "Suggestions. Use arrow keys to navigate, Enter to select, or Escape to cancel.");
+  pickerOptionsEl.setAttribute("aria-label", multiSelect ? "Field choices. Use Space or Enter to mark fields, Enter again to use marked fields, or Escape to cancel." : "Suggestions. Use arrow keys to navigate, Enter to select, or Escape to cancel.");
 
   const sortOrderEl = squerrlPickerEl.querySelector<HTMLSelectElement>("#squerrl-sort-order");
   sortOrderEl?.addEventListener("change", () => {
@@ -1786,6 +1936,13 @@ function renderSQuerrlPicker(
         } else if (event.key === "Enter") {
           event.preventDefault();
           if (multiSelect) {
+            // Enter on an unmarked option marks it so the next Enter commits,
+            // which makes Enter-Enter on "*" the quick path to all fields.
+            const value = button.dataset.squerrlValue?.trim() ?? "";
+            if (value && !selectedSQuerrlFields.has(value)) {
+              button.click();
+              return;
+            }
             commitSQuerrlFields();
           } else {
             selectActiveSQuerrlSuggestion();
@@ -1819,7 +1976,9 @@ function renderSQuerrlPicker(
       return scopedFields;
     }
 
-    return [{ label: "*", value: "* ", detail: "all fields" }, ...scopedFields];
+    // No trailing space: the next character the user types decides whether
+    // more fields follow (a comma) or the projection is done (a space).
+    return [{ label: "*", value: "*", detail: "all fields" }, ...scopedFields];
   };
 
   const getFilteredItems = () => {
@@ -1861,8 +2020,17 @@ function renderSQuerrlPicker(
     renderOptions(getFilteredItems());
   });
 
-  renderOptions(usesFieldScope ? getFilteredItems() : suggestions);
+  const initialItems = usesFieldScope ? getFilteredItems() : suggestions;
+  renderOptions(initialItems);
   squerrlPickerEl.hidden = false;
+
+  // A long list is faster to narrow by typing, so start in the filter box. A
+  // short list is faster to pick from directly, so focus the first entry.
+  if (initialItems.length > SQUERRL_SEARCH_FOCUS_THRESHOLD) {
+    squerrlTableSearchEl?.focus();
+  } else if (initialItems.length) {
+    focusSQuerrlSelection(0);
+  }
 }
 
 async function maybeShowSQuerrlPicker(forceOpen = false) {
@@ -1889,24 +2057,32 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
     const prefix = context.prefix.toLowerCase();
     const tables = schema.filter((table) => table.name.toLowerCase().includes(prefix));
     const selectedTableNames = new Set(
-      [...context.beforeCursor.matchAll(/\bfrom\s+([A-Za-z_][A-Za-z0-9$]*)/gi)].map((match) => match[1].toLowerCase())
+      [...context.beforeCursor.matchAll(/\bfrom\s+([A-Za-z_][A-Za-z0-9_$]*)/gi)].map((match) => match[1].toLowerCase())
     );
     const selectedTables = schema.filter((table) => selectedTableNames.has(table.name.toLowerCase()));
 
     const languageLabel = context.language === "sql" ? "SQL Assist" : context.language === "freeform" ? "Non Assist" : "SQuerL";
 
-    if (context.language === "squerrl" && activeSQuerrlTableName && activeSQuerrlStage === "conditions") {
-      const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
+    const derived = deriveSQuerrlStage(context.beforeCursor);
+
+    // The condition builder is only reachable once the required table and
+    // fields are actually present in the text.
+    if (
+      context.language === "squerrl" &&
+      activeSQuerrlStage === "conditions" &&
+      derived.stage === "options" &&
+      derived.tableName
+    ) {
+      const selectedTable = schema.find((table) => table.name === derived.tableName);
       if (selectedTable) {
         renderSQuerrlConditionBuilder(selectedTable);
         return;
       }
     }
 
-    if (context.language === "squerrl" && activeSQuerrlTableName && activeSQuerrlStage === "fields") {
-      const selectedTable = schema.find((table) => table.name === activeSQuerrlTableName);
-      const hasOnlySelectedTable = context.beforeCursor.trim().toLowerCase() === activeSQuerrlTableName.toLowerCase();
-      if (selectedTable && hasOnlySelectedTable) {
+    if (context.language === "squerrl" && derived.stage === "fields" && derived.tableName) {
+      const selectedTable = schema.find((table) => table.name === derived.tableName);
+      if (selectedTable) {
         renderSQuerrlPicker(
           "Choose fields",
           `SQuerL · ${selectedTable.name} · Space marks fields, Enter uses them, Escape cancels`,
@@ -1942,6 +2118,15 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
       context.language === "sql" &&
       /^\s*select\b/i.test(context.beforeCursor) &&
       !context.hasFrom;
+
+    // "*" followed by a space ends the projection, so finish the clause with
+    // FROM and hand off to the table picker. A comma instead keeps the field
+    // picker open for another field.
+    if (isSqlSelectProjection && /\*\s+$/.test(context.beforeCursor)) {
+      sqlEditorEl?.setRangeText("FROM ", context.cursor, context.cursor, "end");
+      void maybeShowSQuerrlPicker(true);
+      return;
+    }
 
     if (isSqlSelectProjection) {
       renderSQuerrlPicker(
@@ -2026,9 +2211,19 @@ function populatePresetForm(preset: ConnectionPreset | null) {
   presetPortEl.value = preset?.port ?? "";
   presetDatabaseEl.value = preset?.database ?? "";
   presetUsernameEl.value = preset?.username ?? "";
-  presetPasswordEl.value = preset?.password ?? "";
+  presetPasswordEl.value = "";
+  presetPasswordEl.placeholder = preset?.hasStoredPassword
+    ? "Saved in your OS keychain — leave blank to keep it"
+    : "Stored in your OS keychain, never on disk";
   presetAuthModeEl.value = preset?.authMode ?? "sql";
   presetDomainEl.value = preset?.domain ?? "";
+
+  const modalTitleEl = document.querySelector("#connection-modal-title");
+  if (modalTitleEl) {
+    modalTitleEl.textContent = preset
+      ? `Edit Connection — ${preset.name}`
+      : "Add External Connection";
+  }
 }
 
 function renderPresetList() {
@@ -2047,7 +2242,52 @@ function renderPresetList() {
     databaseSelectorEl!.appendChild(option);
   });
 
+  // Action entries, kept at the bottom so they read as commands rather than
+  // selectable targets. Handled in the change listener and never stay selected.
+  const editOption = document.createElement("option");
+  editOption.value = EDIT_CONNECTION_ACTION;
+  editOption.textContent = "⚙ Edit connection settings…";
+  databaseSelectorEl.appendChild(editOption);
+
+  const addOption = document.createElement("option");
+  addOption.value = ADD_CONNECTION_ACTION;
+  addOption.textContent = "＋ Add new connection…";
+  databaseSelectorEl.appendChild(addOption);
+
+  const deleteOption = document.createElement("option");
+  deleteOption.value = DELETE_CONNECTION_ACTION;
+  deleteOption.textContent = "🗑 Delete this connection…";
+  databaseSelectorEl.appendChild(deleteOption);
+
   updateDatabaseSelector();
+}
+
+async function deleteActiveConnection() {
+  const preset = getPresetById(activePresetId);
+  if (!preset) {
+    setLauncherMessage("Select a saved connection before deleting one.", true);
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Delete the connection "${preset.name}"?\n\nIts saved password will also be removed from your OS keychain. This cannot be undone.`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    connectionPresets = connectionPresets.filter((candidate) => candidate.id !== preset.id);
+    activePresetId = null;
+    await persistPresetStore();
+    renderPresetList();
+    syncLauncherUrlToActivePreset();
+    void refreshSavedQueries();
+    setLauncherMessage(`Deleted connection ${preset.name}.`);
+    void recordAppEvent("ui.connection.delete", `Deleted external connection ${preset.name}`);
+  } catch (error) {
+    setLauncherMessage(error instanceof Error ? error.message : String(error), true);
+  }
 }
 
 function syncLauncherUrlToActivePreset() {
@@ -2116,6 +2356,10 @@ function readPresetForm(): ConnectionPreset {
     database: presetDatabaseEl.value.trim(),
     username: presetUsernameEl.value.trim(),
     password: presetPasswordEl.value,
+    // A blank field keeps whatever is already in the keychain rather than clearing it.
+    hasStoredPassword:
+      presetPasswordEl.value.length > 0 ||
+      (getPresetById(presetIdEl.value)?.hasStoredPassword ?? false),
     authMode: presetAuthModeEl.value as ConnectionPreset["authMode"],
     domain: presetDomainEl.value.trim(),
   };
@@ -2262,11 +2506,86 @@ async function testPresetConnection() {
     setPresetBusy(true);
     const result = await invokeBackend<ConnectionTestResult>("test_connection", { preset });
     setLauncherMessage(result.summary);
+    if (result.passwordRenewalRequired) {
+      openPasswordRenewalModal(
+        preset.id,
+        "SQL Server requires this password to be changed now."
+      );
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    setLauncherMessage(message, true);
+    if (!handlePasswordRenewalError(message, presetIdEl?.value || null)) {
+      setLauncherMessage(message, true);
+    }
   } finally {
     setPresetBusy(false);
+  }
+}
+
+async function checkActiveConnectionPasswordStatus() {
+  const preset = getPresetById(activePresetId);
+  if (!preset || preset.engine !== "mssql" || preset.authMode !== "sql") {
+    return;
+  }
+
+  try {
+    const result = await invokeBackend<ConnectionTestResult>("test_connection", { preset });
+    if (result.passwordRenewalRequired) {
+      openPasswordRenewalModal(
+        preset.id,
+        "SQL Server requires this password to be changed now."
+      );
+    } else if (
+      result.passwordDaysRemaining !== null &&
+      result.passwordDaysRemaining <= 14
+    ) {
+      // Still a working password, so warn without interrupting with a dialog.
+      setLauncherMessage(
+        `Password for ${preset.name} expires in ${result.passwordDaysRemaining} day${result.passwordDaysRemaining === 1 ? "" : "s"}. Use Test Connection to renew it.`
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!handlePasswordRenewalError(message, preset.id)) {
+      setLauncherMessage(message, true);
+    }
+  }
+}
+
+async function renewMssqlPassword(event: SubmitEvent) {
+  event.preventDefault();
+  const connectionId = passwordRenewalTargetId;
+  if (
+    !connectionId ||
+    !passwordRenewalOldEl ||
+    !passwordRenewalNewEl ||
+    !passwordRenewalVerifyEl
+  ) {
+    setLauncherMessage("Select a saved MSSQL connection before renewing its password.", true);
+    return;
+  }
+
+  const oldPassword = passwordRenewalOldEl.value;
+  const newPassword = passwordRenewalNewEl.value;
+  if (newPassword !== passwordRenewalVerifyEl.value) {
+    setLauncherMessage("New password and verification do not match.", true);
+    passwordRenewalVerifyEl.focus();
+    return;
+  }
+
+  try {
+    renewPasswordButtonEl?.toggleAttribute("disabled", true);
+    const result = await invokeBackend<ConnectionTestResult>("renew_mssql_password", {
+      connectionId,
+      oldPassword,
+      newPassword,
+    });
+    closePasswordRenewalModal();
+    setLauncherMessage(result.summary);
+  } catch (error) {
+    setLauncherMessage(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    renewPasswordButtonEl?.toggleAttribute("disabled", false);
   }
 }
 
@@ -2293,7 +2612,7 @@ async function runSql() {
 
     if (bufferedSQuerrlStatement) {
       sqlEditorEl.value = execution.statement;
-      setEditorLanguage("sql", execution.statement);
+      setEditorLanguage("sql");
     }
 
     sqlResultsStatusEl!.textContent = execution.squerrlStatement
@@ -2326,7 +2645,9 @@ async function runSql() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     renderSqlResults(null);
-    setLauncherMessage(message, true);
+    if (!handlePasswordRenewalError(message, getActiveConnectionId())) {
+      setLauncherMessage(message, true);
+    }
   } finally {
     runSqlButtonEl?.toggleAttribute("disabled", false);
     clearSqlButtonEl?.toggleAttribute("disabled", false);
@@ -2377,7 +2698,6 @@ function initializeApp() {
   footerBrowserLinkEl = document.querySelector("#footer-browser-link");
   databaseSelectorEl = document.querySelector("#database-selector");
   toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
-  addDatabaseButtonEl = document.querySelector("#add-database-button");
   workspaceDbPathEl = document.querySelector("#workspace-db-path");
   workspaceDbSummaryEl = document.querySelector("#workspace-db-summary");
   useInternalDbButtonEl = document.querySelector("#use-internal-db-button");
@@ -2430,6 +2750,17 @@ function initializeApp() {
   resetPresetButtonEl = document.querySelector("#reset-preset-button");
   connectionModalEl = document.querySelector("#connection-modal");
   closeConnectionModalButtonEl = document.querySelector("#close-connection-modal-button");
+  passwordRenewalModalEl = document.querySelector("#password-renewal-modal");
+  passwordRenewalFormEl = document.querySelector("#password-renewal-form");
+  passwordRenewalMessageEl = document.querySelector("#password-renewal-message");
+  passwordRenewalOldEl = document.querySelector("#password-renewal-old");
+  passwordRenewalNewEl = document.querySelector("#password-renewal-new");
+  passwordRenewalVerifyEl = document.querySelector("#password-renewal-verify");
+  renewPasswordButtonEl = document.querySelector("#renew-password-button");
+  closePasswordRenewalButtonEl = document.querySelector("#close-password-renewal-button");
+  launcherHelpModalEl = document.querySelector("#launcher-help-modal");
+  launchHelpButtonEl = document.querySelector("#launch-help-button");
+  closeLauncherHelpButtonEl = document.querySelector("#close-launcher-help-button");
   applyRuntimeAvailabilityState();
   installTopHorizontalScrollbar();
   renderSqlResults(null);
@@ -2467,6 +2798,7 @@ function initializeApp() {
       renderPresetList();
       syncLauncherUrlToActivePreset();
       void refreshSavedQueries();
+      void checkActiveConnectionPasswordStatus();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -2489,17 +2821,15 @@ function initializeApp() {
 
   sqlEditorEl?.addEventListener("input", () => {
     if (!sqlEditorEl!.value.trim()) {
-      activeQueryLanguage = null;
-      activeSQuerrlTableName = null;
-      activeSQuerrlStage = null;
-      selectedSQuerrlFields.clear();
+      reengageSQuerrlAssist();
+      return;
     }
     hideSQuerrlPicker();
   });
 
   queryLanguageEl?.addEventListener("change", () => {
     const nextLanguage = queryLanguageEl!.value as QueryLanguage;
-    setEditorLanguage(nextLanguage, sqlEditorEl?.value ?? "");
+    setEditorLanguage(nextLanguage);
     hideSQuerrlPicker();
     void maybeShowSQuerrlPicker();
     const modeLabel = queryLanguageEl!.options[queryLanguageEl!.selectedIndex].text;
@@ -2518,7 +2848,12 @@ function initializeApp() {
       return;
     }
 
-    if (event.key === "ArrowDown" && activeQueryLanguage === "squerrl" && activeSQuerrlStage === "options") {
+    // Sort is optional and only offered once a table and fields are present.
+    if (
+      event.key === "ArrowDown" &&
+      getEffectiveQueryLanguage() === "squerrl" &&
+      deriveSQuerrlStage(sqlEditorEl?.value ?? "").stage === "options"
+    ) {
       event.preventDefault();
       openSQuerrlSortOverlay();
       return;
@@ -2583,6 +2918,10 @@ function initializeApp() {
     void savePreset(event);
   });
 
+  passwordRenewalFormEl?.addEventListener("submit", (event) => {
+    void renewMssqlPassword(event);
+  });
+
   savedQueryDropdownEl?.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     const query = target.value;
@@ -2591,7 +2930,7 @@ function initializeApp() {
 
     if (query && sqlEditorEl) {
       sqlEditorEl.value = query;
-      setEditorLanguage(queryLanguage, query);
+      setEditorLanguage(queryLanguage);
       setLauncherMessage("Query loaded into workspace.");
       void recordAppEvent("ui.query.load.saved", `Loaded a saved ${queryLanguage === "squerrl" ? "SQuerL" : "SQL"} statement from the dropdown`);
       target.value = ""; // Reset dropdown
@@ -2621,12 +2960,8 @@ function initializeApp() {
       sqlEditorEl.value = "";
       sqlEditorEl.focus();
     }
-    activeQueryLanguage = null;
-    activeSQuerrlTableName = null;
-    activeSQuerrlStage = null;
-    selectedSQuerrlFields.clear();
-    hideSQuerrlPicker();
     renderSqlResults(null);
+    reengageSQuerrlAssist();
     void recordAppEvent("ui.query.clear", "Cleared the SQL workspace editor and results surface");
   });
 
@@ -2639,6 +2974,40 @@ function initializeApp() {
     const selectedValue = target.value;
 
     // Switch to selected database
+    // Action entries run a command and restore the previous selection rather
+    // than becoming the active target.
+    if (
+      selectedValue === EDIT_CONNECTION_ACTION ||
+      selectedValue === ADD_CONNECTION_ACTION ||
+      selectedValue === DELETE_CONNECTION_ACTION
+    ) {
+      updateDatabaseSelector();
+
+      if (selectedValue === ADD_CONNECTION_ACTION) {
+        resetPresetForm();
+        openConnectionModal();
+        return;
+      }
+
+      if (selectedValue === DELETE_CONNECTION_ACTION) {
+        void deleteActiveConnection();
+        return;
+      }
+
+      const preset = getPresetById(activePresetId);
+      if (!preset) {
+        setLauncherMessage(
+          "Select a saved connection first, then choose Edit connection settings.",
+          true
+        );
+        return;
+      }
+
+      populatePresetForm(preset);
+      openConnectionModal();
+      return;
+    }
+
     if (selectedValue === "internal") {
       activePresetId = null;
     } else {
@@ -2648,6 +3017,7 @@ function initializeApp() {
     void persistPresetStore();
     syncLauncherUrlToActivePreset();
     void refreshSavedQueries();
+    void checkActiveConnectionPasswordStatus();
     updateDatabaseSelector();
     setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
     void recordAppEvent("ui.database.switch", `Switched active database target to ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
@@ -2672,15 +3042,13 @@ function initializeApp() {
     }
   });
 
-  addDatabaseButtonEl?.addEventListener("click", () => {
-    resetPresetForm();
-    openConnectionModal();
-    void recordAppEvent("ui.connection.open", "Opened the external connection modal");
-  });
-
   closeConnectionModalButtonEl?.addEventListener("click", () => {
     closeConnectionModal();
     void recordAppEvent("ui.connection.close", "Closed the external connection modal");
+  });
+
+  closePasswordRenewalButtonEl?.addEventListener("click", () => {
+    closePasswordRenewalModal();
   });
 
   closeQuerySearchModalButtonEl?.addEventListener("click", () => {
@@ -2827,9 +3195,40 @@ function initializeApp() {
     }
   });
 
+  launchHelpButtonEl?.addEventListener("click", () => {
+    setLaunchMenuOpen(false, "button");
+    launcherHelpModalEl?.showModal();
+  });
+
+  closeLauncherHelpButtonEl?.addEventListener("click", () => {
+    launcherHelpModalEl?.close();
+  });
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       setLaunchMenuOpen(false, "button");
+    }
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
+      return;
+    }
+    if (event.key === "F5") {
+      // F5 is the browser reload shortcut, so the default has to be suppressed.
+      event.preventDefault();
+      if (runSqlButtonEl?.hasAttribute("disabled")) {
+        return;
+      }
+      void runSql();
+      return;
+    }
+    if (event.key === "F8") {
+      event.preventDefault();
+      if (clearSqlButtonEl?.hasAttribute("disabled")) {
+        return;
+      }
+      clearSqlButtonEl?.click();
     }
   });
 

@@ -1,0 +1,5 @@
+[target.aarch64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
