@@ -82,11 +82,31 @@
 
             <div class="sql-results-card" aria-live="polite">
               <div class="preset-list__header sql-results-card__header">
-                <h3 id="sql-results-title">Query Results</h3>
+                <div class="sql-results-card__title-row">
+                  <h3 id="sql-results-title">Query Results</h3>
+                  <div class="sql-results-export">
+                    <select id="export-results-format" aria-label="Export format" disabled>
+                      <option value="html">html</option>
+                      <option value="ods">ods</option>
+                      <option value="xlsx">xlsx</option>
+                      <option value="json">json</option>
+                      <option value="pdf">pdf</option>
+                      <option value="csv">csv</option>
+                      <option value="yaml">yaml</option>
+                    </select>
+                    <button type="button" id="export-results-button" disabled>Export</button>
+                  </div>
+                </div>
                 <p id="sql-results-status">Ready.</p>
               </div>
-              <div id="sql-results-output" class="sql-results-output">
-                <p class="sql-results-output__empty">Run a query to see rows or statement results here.</p>
+              <div class="sql-results-surface">
+                <div id="sql-results-output" class="sql-results-output">
+                  <p class="sql-results-output__empty">Run a query to see rows or statement results here.</p>
+                </div>
+                <div id="sql-results-loading" class="sql-results-loading" role="status" aria-live="polite" hidden>
+                  <span class="sql-results-loading__spinner" aria-hidden="true"></span>
+                  <p id="sql-results-loading-text">Running query...</p>
+                </div>
               </div>
             </div>
 

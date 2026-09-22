@@ -3,6 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import initSqlJs from "sql.js";
 import sqlWasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+import {
+  buildExportFile,
+  downloadBytes,
+  EXPORT_FORMATS,
+  exportFileName,
+  type ExportFormat,
+} from "./exportResults.ts";
 
 type TauriWindow = Window & {
   __TAURI_INTERNALS__?: {
@@ -72,6 +79,11 @@ let selectedSQuerrlFields = new Set<string>();
 let squerrlConditionKeyboardController: AbortController | null = null;
 let sqlResultsStatusEl: HTMLElement | null;
 let sqlResultsOutputEl: HTMLElement | null;
+let sqlResultsLoadingEl: HTMLElement | null;
+let sqlResultsLoadingTextEl: HTMLElement | null;
+let exportResultsFormatEl: HTMLSelectElement | null;
+let exportResultsButtonEl: HTMLButtonElement | null;
+let lastSqlQueryResult: SqlQueryResult | null = null;
 let querySearchModalEl: HTMLDialogElement | null;
 let querySearchInputEl: HTMLInputElement | null;
 let queryDateFromEl: HTMLInputElement | null;
@@ -1131,7 +1143,14 @@ function renderSqlResults(result: SqlQueryResult | null) {
     return;
   }
 
+  lastSqlQueryResult = result;
+  syncExportControls();
+
+  // Any new render supersedes rows still being painted by a previous one.
+  sqlResultRenderToken += 1;
+
   if (!result) {
+    setSqlResultsLoading(false);
     sqlResultsStatusEl.textContent = "Ready.";
     sqlResultsOutputEl.innerHTML = '<p class="sql-results-output__empty">Run a query to see rows or statement results here.</p>';
     return;
@@ -1140,6 +1159,7 @@ function renderSqlResults(result: SqlQueryResult | null) {
   sqlResultsStatusEl.textContent = result.message;
 
   if (!result.columns.length) {
+    setSqlResultsLoading(false);
     sqlResultsOutputEl.innerHTML = `
       <p class="sql-results-output__message">${escapeHtml(result.message)}</p>
     `;
@@ -1149,25 +1169,146 @@ function renderSqlResults(result: SqlQueryResult | null) {
   const header = result.columns
     .map((column) => `<th>${escapeHtml(column)}</th>`)
     .join("");
-  const rows = result.rows
-    .map((row) => {
-      const cells = row.map((value) => `<td>${escapeHtml(value)}</td>`).join("");
-      return `<tr>${cells}</tr>`;
-    })
-    .join("");
 
   sqlResultsOutputEl.innerHTML = `
+    <div class="sql-results-scroll-top" aria-hidden="true">
+      <div class="sql-results-scroll-top__spacer"></div>
+    </div>
     <div class="sql-results-table-wrap">
       <table class="sql-results-table">
         <thead>
           <tr>${header}</tr>
         </thead>
-        <tbody>
-          ${rows}
-        </tbody>
+        <tbody></tbody>
       </table>
     </div>
   `;
+
+  wireSqlResultsScrollSync();
+  void fillSqlResultRows(result);
+}
+
+// Rows are appended a slice at a time with a paint between slices. Building
+// every row in one pass is what locks the window on large tables, since the
+// main thread cannot yield until the whole string is parsed.
+const SQL_RESULT_ROW_CHUNK = 250;
+let sqlResultRenderToken = 0;
+
+async function fillSqlResultRows(result: SqlQueryResult) {
+  const body = sqlResultsOutputEl?.querySelector("tbody");
+  if (!body) {
+    return;
+  }
+
+  const token = ++sqlResultRenderToken;
+  const total = result.rows.length;
+
+  for (let start = 0; start < total; start += SQL_RESULT_ROW_CHUNK) {
+    const slice = result.rows.slice(start, start + SQL_RESULT_ROW_CHUNK);
+    body.insertAdjacentHTML(
+      "beforeend",
+      slice
+        .map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`)
+        .join("")
+    );
+
+    const rendered = Math.min(start + SQL_RESULT_ROW_CHUNK, total);
+    if (rendered < total) {
+      setSqlResultsLoading(true, `Rendering ${rendered.toLocaleString()} of ${total.toLocaleString()} rows...`);
+      await nextFrame();
+
+      // A newer query started while this one was still painting.
+      if (token !== sqlResultRenderToken) {
+        return;
+      }
+    }
+  }
+
+  setSqlResultsLoading(false);
+}
+
+function nextFrame() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+function syncExportControls() {
+  const canExport = Boolean(lastSqlQueryResult?.columns.length);
+  exportResultsFormatEl?.toggleAttribute("disabled", !canExport);
+  exportResultsButtonEl?.toggleAttribute("disabled", !canExport);
+}
+
+async function exportSqlResults() {
+  if (!lastSqlQueryResult?.columns.length) {
+    setLauncherMessage("Run a query before exporting results.", true);
+    return;
+  }
+
+  const format = (exportResultsFormatEl?.value ?? "csv") as ExportFormat;
+  if (!EXPORT_FORMATS.includes(format)) {
+    setLauncherMessage("Choose an export format first.", true);
+    return;
+  }
+
+  try {
+    exportResultsButtonEl?.toggleAttribute("disabled", true);
+    const file = await buildExportFile(lastSqlQueryResult, format);
+    const filename = exportFileName(lastSqlQueryResult.connectionLabel, format);
+    downloadBytes(filename, file.bytes, file.mime);
+    setLauncherMessage(`Exported ${filename} (${lastSqlQueryResult.rows.length.toLocaleString()} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}).`);
+    void recordAppEvent("ui.query.export", `Exported query results as ${format}`);
+  } catch (error) {
+    setLauncherMessage(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    syncExportControls();
+  }
+}
+
+function setSqlResultsLoading(active: boolean, message = "Running query...") {
+  if (!sqlResultsLoadingEl) {
+    return;
+  }
+
+  if (sqlResultsLoadingTextEl) {
+    sqlResultsLoadingTextEl.textContent = message;
+  }
+  sqlResultsLoadingEl.hidden = !active;
+}
+
+// Keeps the mirrored top scrollbar in step with the grid below it. The spacer
+// is what gives the top bar something to scroll, so it has to track the
+// table's real width as columns change.
+function wireSqlResultsScrollSync() {
+  const topBar = sqlResultsOutputEl?.querySelector<HTMLElement>(".sql-results-scroll-top");
+  const spacer = topBar?.querySelector<HTMLElement>(".sql-results-scroll-top__spacer");
+  const wrap = sqlResultsOutputEl?.querySelector<HTMLElement>(".sql-results-table-wrap");
+  const table = wrap?.querySelector<HTMLElement>(".sql-results-table");
+  if (!topBar || !spacer || !wrap || !table) {
+    return;
+  }
+
+  const syncWidth = () => {
+    spacer.style.width = `${table.scrollWidth}px`;
+    // An empty track above a table that already fits is just clutter.
+    topBar.hidden = table.scrollWidth <= wrap.clientWidth;
+  };
+
+  syncWidth();
+  new ResizeObserver(syncWidth).observe(table);
+
+  // Assigning only on a real difference lets the echoed scroll event settle
+  // instead of bouncing between the two elements.
+  const link = (from: HTMLElement, to: HTMLElement) => {
+    from.addEventListener("scroll", () => {
+      if (to.scrollLeft !== from.scrollLeft) {
+        to.scrollLeft = from.scrollLeft;
+      }
+    });
+  };
+
+  link(topBar, wrap);
+  link(wrap, topBar);
 }
 
 function openConnectionModal() {
@@ -2666,6 +2807,7 @@ async function runSql() {
     setLauncherMessage(execution.squerrlStatement
       ? "SQuerL buffered, translated to SQL, and running query..."
       : "Running SQL query...");
+    setSqlResultsLoading(true, `Running query against ${connectionLabel}...`);
     const result = await invokeBackend<SqlQueryResult>("execute_sql_query", {
       connectionId,
       sql: execution.statement,
@@ -2698,6 +2840,8 @@ async function runSql() {
       setLauncherMessage(message, true);
     }
   } finally {
+    // The overlay is dismissed by renderSqlResults once the rows have finished
+    // painting, which outlives this function on large result sets.
     runSqlButtonEl?.toggleAttribute("disabled", false);
     clearSqlButtonEl?.toggleAttribute("disabled", false);
   }
@@ -2766,6 +2910,10 @@ function initializeApp() {
   squerrlSortOverlayEl = document.querySelector("#squerrl-sort-overlay");
   sqlResultsStatusEl = document.querySelector("#sql-results-status");
   sqlResultsOutputEl = document.querySelector("#sql-results-output");
+  sqlResultsLoadingEl = document.querySelector("#sql-results-loading");
+  sqlResultsLoadingTextEl = document.querySelector("#sql-results-loading-text");
+  exportResultsFormatEl = document.querySelector("#export-results-format");
+  exportResultsButtonEl = document.querySelector("#export-results-button");
   querySearchModalEl = document.querySelector("#query-search-modal");
   querySearchInputEl = document.querySelector("#query-search-input");
   queryDateFromEl = document.querySelector("#query-date-from");
@@ -2868,6 +3016,10 @@ function initializeApp() {
 
   runSqlButtonEl?.addEventListener("click", () => {
     void runSql();
+  });
+
+  exportResultsButtonEl?.addEventListener("click", () => {
+    void exportSqlResults();
   });
 
   sqlEditorEl?.addEventListener("input", () => {
