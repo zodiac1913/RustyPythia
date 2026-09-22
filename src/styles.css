@@ -8,6 +8,14 @@
   --accent-rust-soft: #d08a72;
   --accent-rust-wash: rgba(177, 88, 61, 0.14);
   --accent-rust-border: rgba(177, 88, 61, 0.42);
+  /* Popover surfaces are opaque and set their own text colour so they never
+     inherit an ancestor colour that matches their own background. */
+  --menu-surface: #fffaf8;
+  --menu-border: #8b4530;
+  --menu-text: #201514;
+  --menu-active-surface: #8b4530;
+  --menu-active-text: #fff8f5;
+  --menu-focus-ring: #201514;
   --page-background-image: url("/src/ui/pics/RustyPythia.png");
   --page-background-opacity: 0.34;
   --page-background-wash: rgba(243, 237, 234, 0.18);
@@ -729,16 +737,81 @@ body::after {
 }
 
 .sql-results-export {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  position: relative;
 }
 
-.sql-results-export select,
-.sql-results-export button {
+.sql-results-export > button {
   width: auto;
-  padding: 0.35em 0.7em;
-  font-size: 0.86rem;
+  padding: 0.35em 0.8em;
+  font-size: 0.9rem;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  min-width: 180px;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  /* Opaque surface and an explicit colour: the menu must not inherit the
+     card's text colour, which left it white-on-white under a dark theme. */
+  border: 1px solid var(--menu-border);
+  border-radius: 10px;
+  background: var(--menu-surface);
+  color: var(--menu-text);
+  box-shadow: 0 16px 36px rgba(70, 34, 24, 0.3);
+}
+
+.export-menu[hidden] {
+  display: none;
+}
+
+.export-menu button {
+  width: 100%;
+  padding: 0.45em 0.75em;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* A solid fill rather than a faint tint, so the active item is unmistakable
+   and clears WCAG 1.4.11 non-text contrast. */
+.export-menu button:hover {
+  background: var(--menu-active-surface);
+  color: var(--menu-active-text);
+}
+
+.export-menu button:focus-visible {
+  outline: 3px solid var(--menu-focus-ring);
+  outline-offset: -1px;
+  background: var(--menu-active-surface);
+  color: var(--menu-active-text);
+}
+
+/* Windows High Contrast and similar modes replace authored colours, so the
+   menu is re-stated in system colours to stay legible. */
+@media (forced-colors: active) {
+  .export-menu {
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .export-menu button:hover,
+  .export-menu button:focus-visible {
+    background: Highlight;
+    color: HighlightText;
+  }
 }
 
 .sql-results-card {
@@ -1495,6 +1568,12 @@ button:focus-visible {
     --accent-rust-soft: #e5a088;
     --accent-rust-wash: rgba(208, 122, 95, 0.16);
     --accent-rust-border: rgba(208, 122, 95, 0.45);
+    --menu-surface: #2b1a17;
+    --menu-border: #e5a088;
+    --menu-text: #f8f2f0;
+    --menu-active-surface: #e5a088;
+    --menu-active-text: #1f1615;
+    --menu-focus-ring: #f8f2f0;
     --page-background-opacity: 0.22;
     --page-background-wash: rgba(31, 22, 21, 0.22);
     --page-background-glow: rgba(177, 88, 61, 0.04);

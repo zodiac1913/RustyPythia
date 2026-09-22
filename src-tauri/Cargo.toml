@@ -30,9 +30,17 @@ tokio-util = { version = "0.7", features = ["compat"] }
 tiberius = { path = "vendor/tiberius", default-features = false, features = ["rustls", "tds73", "tokio", "chrono"] }
 chrono = "0.4"
 futures-util = "0.3"
+base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "4", default-features = false, features = ["apple-native-keyring-store"] }
+# Used to render an export's HTML through the system WebKit engine and capture
+# it as PDF, so the PDF is the same layout the HTML export produces.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData", "NSURL", "NSDate", "NSRunLoop", "NSError", "NSValue"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKWebViewConfiguration", "WKPDFConfiguration", "WKNavigation", "block2"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "4", default-features = false, features = ["windows-native-keyring-store"] }

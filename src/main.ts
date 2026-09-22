@@ -81,7 +81,7 @@ let sqlResultsStatusEl: HTMLElement | null;
 let sqlResultsOutputEl: HTMLElement | null;
 let sqlResultsLoadingEl: HTMLElement | null;
 let sqlResultsLoadingTextEl: HTMLElement | null;
-let exportResultsFormatEl: HTMLSelectElement | null;
+let exportResultsMenuEl: HTMLElement | null;
 let exportResultsButtonEl: HTMLButtonElement | null;
 let lastSqlQueryResult: SqlQueryResult | null = null;
 let querySearchModalEl: HTMLDialogElement | null;
@@ -1235,17 +1235,41 @@ function nextFrame() {
 
 function syncExportControls() {
   const canExport = Boolean(lastSqlQueryResult?.columns.length);
-  exportResultsFormatEl?.toggleAttribute("disabled", !canExport);
   exportResultsButtonEl?.toggleAttribute("disabled", !canExport);
+  if (!canExport) {
+    closeExportMenu();
+  }
 }
 
-async function exportSqlResults() {
+function exportMenuItems() {
+  return Array.from(exportResultsMenuEl?.querySelectorAll<HTMLButtonElement>("[data-export-format]") ?? []);
+}
+
+function setExportMenuOpen(open: boolean, focus: "first" | "last" = "first") {
+  if (!exportResultsMenuEl) {
+    return;
+  }
+
+  exportResultsMenuEl.hidden = !open;
+  exportResultsButtonEl?.setAttribute("aria-expanded", String(open));
+  if (!open) {
+    return;
+  }
+
+  const items = exportMenuItems();
+  (focus === "last" ? items[items.length - 1] : items[0])?.focus();
+}
+
+function closeExportMenu() {
+  setExportMenuOpen(false);
+}
+
+async function exportSqlResults(format: ExportFormat) {
   if (!lastSqlQueryResult?.columns.length) {
     setLauncherMessage("Run a query before exporting results.", true);
     return;
   }
 
-  const format = (exportResultsFormatEl?.value ?? "csv") as ExportFormat;
   if (!EXPORT_FORMATS.includes(format)) {
     setLauncherMessage("Choose an export format first.", true);
     return;
@@ -1253,10 +1277,39 @@ async function exportSqlResults() {
 
   try {
     exportResultsButtonEl?.toggleAttribute("disabled", true);
-    const file = await buildExportFile(lastSqlQueryResult, format);
     const filename = exportFileName(lastSqlQueryResult.connectionLabel, format);
-    downloadBytes(filename, file.bytes, file.mime);
-    setLauncherMessage(`Exported ${filename} (${lastSqlQueryResult.rows.length.toLocaleString()} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}).`);
+    const rowCount = lastSqlQueryResult.rows.length.toLocaleString();
+    const rowLabel = `${rowCount} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}`;
+
+    // The PDF is the HTML export rendered by WebKit, so the two formats lay out
+    // identically. Only the desktop build has an engine to render with; the
+    // browser fallback keeps the hand-built PDF.
+    if (format === "pdf" && hasTauriBackend()) {
+      const page = await buildExportFile(lastSqlQueryResult, "html");
+      const savedPath = await invokeBackend<string>("save_export_pdf", {
+        filename,
+        html: new TextDecoder().decode(page.bytes),
+      });
+      setLauncherMessage(`Exported ${rowLabel} to ${savedPath}`);
+      void recordAppEvent("ui.query.export", `Exported query results as ${format}`);
+      return;
+    }
+
+    const file = await buildExportFile(lastSqlQueryResult, format);
+
+    // A blob download is a no-op in the Tauri webview, so the desktop build
+    // hands the bytes to Rust and only the browser fallback uses <a download>.
+    if (hasTauriBackend()) {
+      const savedPath = await invokeBackend<string>("save_export_file", {
+        filename,
+        contentsBase64: bytesToBase64(file.bytes),
+      });
+      setLauncherMessage(`Exported ${rowLabel} to ${savedPath}`);
+    } else {
+      downloadBytes(filename, file.bytes, file.mime);
+      setLauncherMessage(`Exported ${filename} (${rowLabel}).`);
+    }
+
     void recordAppEvent("ui.query.export", `Exported query results as ${format}`);
   } catch (error) {
     setLauncherMessage(error instanceof Error ? error.message : String(error), true);
@@ -2912,7 +2965,7 @@ function initializeApp() {
   sqlResultsOutputEl = document.querySelector("#sql-results-output");
   sqlResultsLoadingEl = document.querySelector("#sql-results-loading");
   sqlResultsLoadingTextEl = document.querySelector("#sql-results-loading-text");
-  exportResultsFormatEl = document.querySelector("#export-results-format");
+  exportResultsMenuEl = document.querySelector("#export-results-menu");
   exportResultsButtonEl = document.querySelector("#export-results-button");
   querySearchModalEl = document.querySelector("#query-search-modal");
   querySearchInputEl = document.querySelector("#query-search-input");
@@ -3018,8 +3071,74 @@ function initializeApp() {
     void runSql();
   });
 
-  exportResultsButtonEl?.addEventListener("click", () => {
-    void exportSqlResults();
+  exportResultsButtonEl?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setExportMenuOpen(Boolean(exportResultsMenuEl?.hidden));
+  });
+
+  exportResultsMenuEl?.addEventListener("click", (event) => {
+    const format = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-export-format]")?.dataset
+      .exportFormat as ExportFormat | undefined;
+    if (!format) {
+      return;
+    }
+
+    closeExportMenu();
+    void exportSqlResults(format);
+  });
+
+  // Opening with the keyboard lands on the first or last item, matching the
+  // ARIA menu button pattern the markup advertises.
+  exportResultsButtonEl?.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      return;
+    }
+    event.preventDefault();
+    setExportMenuOpen(true, event.key === "ArrowUp" ? "last" : "first");
+  });
+
+  exportResultsMenuEl?.addEventListener("keydown", (event) => {
+    const items = exportMenuItems();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+
+    switch (event.key) {
+      case "Escape":
+        event.preventDefault();
+        closeExportMenu();
+        exportResultsButtonEl?.focus();
+        break;
+      case "Tab":
+        // Tab leaves the menu rather than walking it, so close on the way out.
+        closeExportMenu();
+        break;
+      case "ArrowDown":
+        event.preventDefault();
+        items[(current + 1) % items.length]?.focus();
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        items[(current - 1 + items.length) % items.length]?.focus();
+        break;
+      case "Home":
+        event.preventDefault();
+        items[0]?.focus();
+        break;
+      case "End":
+        event.preventDefault();
+        items[items.length - 1]?.focus();
+        break;
+      default:
+        break;
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!exportResultsMenuEl || exportResultsMenuEl.hidden) {
+      return;
+    }
+    if (!(event.target as Node | null) || !exportResultsMenuEl.parentElement?.contains(event.target as Node)) {
+      closeExportMenu();
+    }
   });
 
   sqlEditorEl?.addEventListener("input", () => {

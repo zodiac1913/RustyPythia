@@ -85,16 +85,18 @@
                 <div class="sql-results-card__title-row">
                   <h3 id="sql-results-title">Query Results</h3>
                   <div class="sql-results-export">
-                    <select id="export-results-format" aria-label="Export format" disabled>
-                      <option value="html">html</option>
-                      <option value="ods">ods</option>
-                      <option value="xlsx">xlsx</option>
-                      <option value="json">json</option>
-                      <option value="pdf">pdf</option>
-                      <option value="csv">csv</option>
-                      <option value="yaml">yaml</option>
-                    </select>
-                    <button type="button" id="export-results-button" disabled>Export</button>
+                    <button type="button" id="export-results-button" aria-haspopup="menu" aria-expanded="false" disabled>Export</button>
+                    <!-- Roving tabindex: the menu pattern moves between items with
+                         the arrow keys rather than Tab. -->
+                    <div class="export-menu" id="export-results-menu" role="menu" aria-label="Export format" hidden>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="html">html</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="ods">ods</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="xlsx">xlsx</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="json">json</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="pdf">pdf</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="csv">csv</button>
+                      <button type="button" role="menuitem" tabindex="-1" data-export-format="yaml">yaml</button>
+                    </div>
                   </div>
                 </div>
                 <p id="sql-results-status">Ready.</p>

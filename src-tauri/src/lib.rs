@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use keyring::Entry as KeyringEntry;
 use postgres::{Client as PostgresClient, Config as PostgresConfig, NoTls};
 use rusqlite::types::ValueRef;
@@ -1811,6 +1813,179 @@ fn build_sql_window(app: &AppHandle, target_url: &str) -> Result<(), String> {
         .map_err(|err| format!("Failed to create SQL window: {}", err))
 }
 
+/// Writes an exported result set to the user's Downloads folder.
+///
+/// The webview cannot do this itself: an `<a download>` on a blob URL is a
+/// no-op in WKWebView because there is no download manager behind it, so the
+/// bytes have to cross into Rust to reach the disk.
+#[tauri::command]
+fn save_export_file(app: AppHandle, filename: String, contents_base64: String) -> Result<String, String> {
+    let bytes = BASE64
+        .decode(contents_base64.as_bytes())
+        .map_err(|err| format!("Failed to decode the export payload: {}", err))?;
+
+    // Keep the name a leaf so a crafted filename cannot escape the folder.
+    let leaf = PathBuf::from(&filename);
+    let name = leaf
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Invalid export file name '{}'.", filename))?;
+
+    let directory = app
+        .path()
+        .download_dir()
+        .map_err(|err| format!("Failed to locate the Downloads folder: {}", err))?;
+    fs::create_dir_all(&directory)
+        .map_err(|err| format!("Failed to open the Downloads folder: {}", err))?;
+
+    let target = directory.join(name);
+    fs::write(&target, &bytes)
+        .map_err(|err| format!("Failed to write {}: {}", target.display(), err))?;
+
+    write_app_log(
+        &app,
+        "query.export",
+        &format!("Exported query results to {}", target.display()),
+    );
+
+    Ok(target.display().to_string())
+}
+
+/// Renders an export's HTML with the system WebKit engine and returns PDF bytes.
+///
+/// Laying a table out as PDF by hand forces a choice between shrinking the type
+/// and splitting columns across sheets. Handing the HTML to the same engine that
+/// renders the app sidesteps that entirely: WebKit measures the content, so the
+/// PDF is the HTML export, at the same size, with every column intact.
+#[cfg(target_os = "macos")]
+fn render_html_as_pdf(html: &str) -> Result<Vec<u8>, String> {
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_foundation::{NSDate, NSRunLoop, NSString};
+    use objc2_web_kit::{WKPDFConfiguration, WKWebView, WKWebViewConfiguration};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    let marker = MainThreadMarker::new()
+        .ok_or_else(|| "PDF rendering must run on the main thread.".to_string())?;
+
+    // Spins the run loop so WebKit, which is asynchronous, can make progress
+    // while this call waits for it. `done` is polled rather than awaited
+    // because the completion handlers fire on this same thread.
+    let pump = |done: &dyn Fn() -> bool, timeout: Duration, what: &str| -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        while !done() {
+            if Instant::now() > deadline {
+                return Err(format!("Timed out waiting for the PDF renderer to {}.", what));
+            }
+            let until = NSDate::dateWithTimeIntervalSinceNow(0.01);
+            NSRunLoop::currentRunLoop().runUntilDate(&until);
+        }
+        Ok(())
+    };
+
+    unsafe {
+        let configuration = WKWebViewConfiguration::new(marker);
+        // An arbitrary starting viewport; the content is measured after load and
+        // the view is resized to fit before anything is captured.
+        let start = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 900.0));
+        let webview = WKWebView::initWithFrame_configuration(
+            WKWebView::alloc(marker),
+            start,
+            &configuration,
+        );
+
+        webview.loadHTMLString_baseURL(&NSString::from_str(html), None);
+        pump(&|| !webview.isLoading(), Duration::from_secs(30), "load the table")?;
+
+        // scrollWidth/scrollHeight are the full content box, including whatever
+        // overflows the viewport, which is exactly the page size wanted.
+        let measured: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
+        let sink = measured.clone();
+        let handler = RcBlock::new(move |value: *mut objc2::runtime::AnyObject, _err: *mut objc2_foundation::NSError| {
+            let mut size = (0.0, 0.0);
+            if !value.is_null() {
+                let text: Retained<NSString> = Retained::retain(value.cast()).unwrap();
+                let parts = text.to_string();
+                let mut dimensions = parts.split('x').map(|part| part.trim().parse::<f64>().unwrap_or(0.0));
+                size = (dimensions.next().unwrap_or(0.0), dimensions.next().unwrap_or(0.0));
+            }
+            *sink.borrow_mut() = Some(size);
+        });
+        let measure = NSString::from_str(
+            "(function(){var d=document.documentElement,b=document.body;\
+             var w=Math.max(d.scrollWidth,b.scrollWidth),h=Math.max(d.scrollHeight,b.scrollHeight);\
+             return w+'x'+h;})()",
+        );
+        webview.evaluateJavaScript_completionHandler(&measure, Some(&handler));
+        pump(&|| measured.borrow().is_some(), Duration::from_secs(10), "measure the table")?;
+
+        let (width, height) = measured.borrow().unwrap_or((0.0, 0.0));
+        if width <= 0.0 || height <= 0.0 {
+            return Err("The PDF renderer could not measure the table.".to_string());
+        }
+
+        // Resizing to the content means the capture needs no scaling, so the
+        // type lands in the PDF at the size the HTML specifies.
+        let full = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
+        webview.setFrame(full);
+        pump(&|| !webview.isLoading(), Duration::from_secs(10), "settle the layout")?;
+
+        let pdf_configuration = WKPDFConfiguration::new(marker);
+        pdf_configuration.setRect(full);
+
+        let captured: Rc<RefCell<Option<Result<Vec<u8>, String>>>> = Rc::new(RefCell::new(None));
+        let sink = captured.clone();
+        let handler = RcBlock::new(move |data: *mut objc2_foundation::NSData, error: *mut objc2_foundation::NSError| {
+            let outcome = if data.is_null() {
+                let reason = if error.is_null() {
+                    "WebKit returned no PDF data.".to_string()
+                } else {
+                    Retained::retain(error).unwrap().localizedDescription().to_string()
+                };
+                Err(reason)
+            } else {
+                Ok(Retained::retain(data).unwrap().to_vec())
+            };
+            *sink.borrow_mut() = Some(outcome);
+        });
+        webview.createPDFWithConfiguration_completionHandler(Some(&pdf_configuration), &handler);
+        pump(&|| captured.borrow().is_some(), Duration::from_secs(60), "draw the PDF")?;
+
+        let outcome = captured.borrow_mut().take();
+        outcome.unwrap_or_else(|| Err("The PDF renderer produced no result.".to_string()))
+    }
+}
+
+/// Exports the results as a PDF rendered from the HTML export, then saves it.
+#[tauri::command]
+async fn save_export_pdf(app: AppHandle, filename: String, html: String) -> Result<String, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+
+    // WebKit is main-thread only, so the render is dispatched there and the
+    // bytes come back over a channel.
+    let dispatch = app.run_on_main_thread(move || {
+        #[cfg(target_os = "macos")]
+        let outcome = render_html_as_pdf(&html);
+        #[cfg(not(target_os = "macos"))]
+        let outcome = {
+            let _ = &html;
+            Err("Rendering a PDF from HTML is only supported on macOS.".to_string())
+        };
+        let _ = sender.send(outcome);
+    });
+    dispatch.map_err(|err| format!("Failed to start the PDF renderer: {}", err))?;
+
+    let bytes = receiver
+        .recv()
+        .map_err(|_| "The PDF renderer stopped before it finished.".to_string())??;
+
+    save_export_file(app, filename, BASE64.encode(&bytes))
+}
+
 #[tauri::command]
 fn open_sql_window(app: AppHandle, url: String) -> Result<(), String> {
     let result = build_sql_window(&app, &url);
@@ -1862,6 +2037,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            save_export_file,
+            save_export_pdf,
             open_sql_window,
             execute_sql_query,
             load_sql_schema,
