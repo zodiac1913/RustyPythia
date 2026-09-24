@@ -1,3 +1,5 @@
+mod bridge;
+
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use keyring::Entry as KeyringEntry;
@@ -702,6 +704,10 @@ enum QueryTarget {
         preset: Box<ConnectionPreset>,
         label: String,
     },
+    Postgres {
+        preset: Box<ConnectionPreset>,
+        label: String,
+    },
 }
 
 fn read_preset_by_id(app: &AppHandle, connection_id: &str) -> Result<ConnectionPreset, String> {
@@ -766,8 +772,12 @@ fn resolve_query_target(app: &AppHandle, connection_id: &str) -> Result<QueryTar
             preset: Box::new(read_preset_by_id(app, connection_id)?),
             label: display_name,
         }),
+        "postgres" => Ok(QueryTarget::Postgres {
+            preset: Box::new(read_preset_by_id(app, connection_id)?),
+            label: display_name,
+        }),
         other => Err(format!(
-            "Direct query execution is currently available for the internal workspace database, SQLite, and MSSQL targets. '{}' uses {}.",
+            "Direct query execution is currently available for the internal workspace database, SQLite, MSSQL, and Postgres targets. '{}' uses {}.",
             display_name, other
         )),
     }
@@ -928,6 +938,19 @@ async fn execute_sql_query(
     connection_id: Option<String>,
     sql: String,
 ) -> Result<SqlQueryResult, String> {
+    run_sql_query(app, connection_id, sql).await
+}
+
+/// The query engine behind both entry points.
+///
+/// The Tauri command and the loopback HTTP bridge call this, so a browser
+/// session reaches the same drivers as the desktop window instead of falling
+/// back to a local SQLite imitation.
+pub(crate) async fn run_sql_query(
+    app: AppHandle,
+    connection_id: Option<String>,
+    sql: String,
+) -> Result<SqlQueryResult, String> {
     let sql = sql.trim().to_string();
     let normalized_sql = sql.as_str();
     if normalized_sql.is_empty() {
@@ -960,6 +983,13 @@ async fn execute_sql_query(
             )
             .await
         }
+        Ok(QueryTarget::Postgres { preset, label }) => execute_postgres_query(
+            &preset,
+            &connection_id,
+            &label,
+            normalized_sql,
+            is_row_query,
+        ),
         Ok(QueryTarget::Sqlite {
             path: target_path,
             label: connection_label,
@@ -1060,11 +1090,31 @@ async fn load_sql_schema(
     app: AppHandle,
     connection_id: Option<String>,
 ) -> Result<Vec<SqlSchemaTable>, String> {
+    run_load_sql_schema(app, connection_id).await
+}
+
+pub(crate) async fn run_load_sql_schema(
+    app: AppHandle,
+    connection_id: Option<String>,
+) -> Result<Vec<SqlSchemaTable>, String> {
     let connection_id = normalize_connection_id(connection_id.as_deref()).to_string();
     let target_path = match resolve_query_target(&app, &connection_id)? {
         QueryTarget::Sqlite { path, .. } => path,
         QueryTarget::Mssql { preset, .. } => {
             let tables = load_mssql_schema(&preset).await?;
+            write_app_log(
+                &app,
+                "schema.load",
+                &format!(
+                    "Loaded schema for {} with {} table(s)",
+                    connection_id,
+                    tables.len()
+                ),
+            );
+            return Ok(tables);
+        }
+        QueryTarget::Postgres { preset, .. } => {
+            let tables = load_postgres_schema(&preset)?;
             write_app_log(
                 &app,
                 "schema.load",
@@ -1633,7 +1683,7 @@ async fn test_mssql_connection(preset: &ConnectionPreset) -> Result<ConnectionTe
     })
 }
 
-fn test_postgres_connection(preset: &ConnectionPreset) -> Result<ConnectionTestResult, String> {
+fn connect_postgres(preset: &ConnectionPreset) -> Result<PostgresClient, String> {
     let host = preset.host.trim();
     if host.is_empty() {
         return Err("Host is required for Postgres presets.".into());
@@ -1654,9 +1704,162 @@ fn test_postgres_connection(preset: &ConnectionPreset) -> Result<ConnectionTestR
         config.dbname(preset.database.trim());
     }
 
-    let _client: PostgresClient = config
+    config
         .connect(NoTls)
-        .map_err(|err| format!("Postgres login failed for {}: {}", host, err))?;
+        .map_err(|err| format!("Postgres login failed for {}: {}", host, err))
+}
+
+fn postgres_cell_to_string(row: &postgres::Row, index: usize) -> String {
+    if let Ok(value) = row.try_get::<_, Option<String>>(index) {
+        return value.unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<bool>>(index) {
+        return value.map(|flag| flag.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<i16>>(index) {
+        return value.map(|number| number.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<i32>>(index) {
+        return value.map(|number| number.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<i64>>(index) {
+        return value.map(|number| number.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<f32>>(index) {
+        return value.map(|number| number.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<f64>>(index) {
+        return value.map(|number| number.to_string()).unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<chrono::NaiveDate>>(index) {
+        return value
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<chrono::NaiveTime>>(index) {
+        return value
+            .map(|time| time.to_string())
+            .unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<chrono::NaiveDateTime>>(index) {
+        return value
+            .map(|stamp| stamp.to_string())
+            .unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(index) {
+        return value
+            .map(|stamp| stamp.to_rfc3339())
+            .unwrap_or_else(|| "NULL".into());
+    }
+    if let Ok(value) = row.try_get::<_, Option<Vec<u8>>>(index) {
+        return value
+            .map(|bytes| format!("<{} bytes>", bytes.len()))
+            .unwrap_or_else(|| "NULL".into());
+    }
+
+    "<unreadable>".into()
+}
+
+fn execute_postgres_query(
+    preset: &ConnectionPreset,
+    connection_id: &str,
+    connection_label: &str,
+    sql: &str,
+    is_row_query: bool,
+) -> Result<SqlQueryResult, String> {
+    let mut client = connect_postgres(preset)?;
+    let statement = client
+        .prepare(sql)
+        .map_err(|err| format!("Failed to prepare query: {}", err))?;
+    let columns = statement
+        .columns()
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect::<Vec<_>>();
+
+    if is_row_query {
+        let rows = client
+            .query(&statement, &[])
+            .map_err(|err| format!("Failed to execute query: {}", err))?;
+        let values = rows
+            .iter()
+            .map(|row| {
+                (0..columns.len())
+                    .map(|index| postgres_cell_to_string(row, index))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        return Ok(SqlQueryResult {
+            connection_id: connection_id.to_string(),
+            connection_label: connection_label.to_string(),
+            rows_affected: values.len(),
+            message: format!(
+                "Loaded {} row{} from {}.",
+                values.len(),
+                if values.len() == 1 { "" } else { "s" },
+                connection_label
+            ),
+            columns,
+            rows: values,
+        });
+    }
+
+    let rows_affected = client
+        .execute(&statement, &[])
+        .map_err(|err| format!("Failed to execute statement: {}", err))? as usize;
+
+    Ok(SqlQueryResult {
+        connection_id: connection_id.to_string(),
+        connection_label: connection_label.to_string(),
+        columns: Vec::new(),
+        rows: Vec::new(),
+        rows_affected,
+        message: format!(
+            "Executed statement against {}. {} row{} affected.",
+            connection_label,
+            rows_affected,
+            if rows_affected == 1 { "" } else { "s" }
+        ),
+    })
+}
+
+fn load_postgres_schema(preset: &ConnectionPreset) -> Result<Vec<SqlSchemaTable>, String> {
+    let mut client = connect_postgres(preset)?;
+    let rows = client
+        .query(
+            "
+            SELECT table_schema, table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY table_schema, table_name, ordinal_position
+            ",
+            &[],
+        )
+        .map_err(|err| format!("Failed to query Postgres schema: {}", err))?;
+
+    let mut tables: Vec<SqlSchemaTable> = Vec::new();
+    for row in &rows {
+        let schema_name: String = row.get(0);
+        let table_name: String = row.get(1);
+        let column_name: String = row.get(2);
+        let qualified_name = format!("{}.{}", schema_name, table_name);
+
+        match tables.last_mut() {
+            Some(table) if table.name == qualified_name => table.fields.push(column_name),
+            _ => tables.push(SqlSchemaTable {
+                name: qualified_name,
+                fields: vec![column_name],
+            }),
+        }
+    }
+
+    Ok(tables)
+}
+
+fn test_postgres_connection(preset: &ConnectionPreset) -> Result<ConnectionTestResult, String> {
+    let host = preset.host.trim();
+    let _client = connect_postgres(preset)?;
 
     let database_suffix = if preset.database.trim().is_empty() {
         String::new()
@@ -1986,6 +2189,42 @@ async fn save_export_pdf(app: AppHandle, filename: String, html: String) -> Resu
     save_export_file(app, filename, BASE64.encode(&bytes))
 }
 
+/// Opens a second Rusty Pythia workspace as a first-class app window.
+///
+/// This loads the bundled UI rather than the bridge's HTTP address, so the
+/// window gets a normal Tauri context. A remote URL would be treated as an
+/// untrusted origin and every command would be denied.
+#[tauri::command]
+fn open_workspace_window(app: AppHandle) -> Result<(), String> {
+    let mut window_config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .ok_or_else(|| "Missing main window configuration.".to_string())?;
+
+    // The label has to match the capability's window pattern, or the new
+    // window loads but cannot call a single command.
+    window_config.label = format!("workspace-{}", next_window_suffix());
+    window_config.title = "Rusty Pythia".into();
+    window_config.url = WebviewUrl::App("index.html".into());
+    window_config.create = true;
+    window_config.width = 1360.0;
+    window_config.height = 900.0;
+    window_config.min_width = Some(1024.0);
+    window_config.min_height = Some(700.0);
+
+    WebviewWindowBuilder::from_config(&app, &window_config)
+        .map_err(|err| format!("Failed to load workspace window config: {}", err))?
+        .background_color(rusty_window_color())
+        .build()
+        .map_err(|err| format!("Failed to create workspace window: {}", err))?;
+
+    write_app_log(&app, "workspace.window", "Opened an additional workspace window");
+    Ok(())
+}
+
 #[tauri::command]
 fn open_sql_window(app: AppHandle, url: String) -> Result<(), String> {
     let result = build_sql_window(&app, &url);
@@ -2032,14 +2271,65 @@ fn build_internal_window(app: &tauri::App) -> Result<(), String> {
         .map_err(|err| format!("Failed to create Tauri window: {}", err))
 }
 
+/// Set once a window has actually been observed.
+///
+/// Counting windows at startup is unreliable, and a zero read before the first
+/// window registers would quit the app the moment it launched. Shutdown is
+/// therefore only ever considered after a window has genuinely been seen.
+static SAW_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quits once nothing is using the app any more.
+///
+/// Closing every window is not enough on its own: a browser session talking to
+/// the SQL bridge keeps the backend meaningful, so the process only exits when
+/// both the native windows and the bridge sessions are gone.
+pub(crate) fn evaluate_shutdown(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    let windows = app.webview_windows().len();
+
+    if windows > 0 {
+        SAW_WINDOW.store(true, Ordering::SeqCst);
+        return;
+    }
+
+    // Never quit on a zero count that was never preceded by a real window.
+    if !SAW_WINDOW.load(Ordering::SeqCst) {
+        return;
+    }
+
+    if bridge::active_session_count() > 0 {
+        return;
+    }
+
+    write_app_log(
+        app,
+        "app.shutdown",
+        "No windows or browser sessions remain; shutting down",
+    );
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                // The window is still in the runtime's map while this fires, so
+                // the count is taken a moment later.
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    evaluate_shutdown(&app);
+                });
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             save_export_file,
             save_export_pdf,
             open_sql_window,
+            open_workspace_window,
             execute_sql_query,
             load_sql_schema,
             load_app_log,
@@ -2051,11 +2341,20 @@ pub fn run() {
             load_preset_store,
             save_preset_store,
             test_connection,
-            renew_mssql_password
+            renew_mssql_password,
+            bridge::get_bridge_info
         ])
         .setup(|app| {
             ensure_workspace_database(&app.handle())?;
             build_internal_window(app)?;
+            match bridge::start(&app.handle()) {
+                Ok(info) => write_app_log(
+                    &app.handle(),
+                    "bridge.start",
+                    &format!("SQL bridge listening on 127.0.0.1:{}", info.port),
+                ),
+                Err(err) => write_app_log(&app.handle(), "bridge.error", &err),
+            }
             write_app_log(
                 &app.handle(),
                 "app.startup",
@@ -2065,5 +2364,21 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Rusty Pythia")
-        .run(|_, _| {});
+        .run(|app, event| {
+            // Closing the last native window makes Tauri quit by default, which
+            // would kill browser sessions still talking to the SQL bridge. Those
+            // sessions hold the app open; the reaper exits once they expire.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                if code.is_none() && bridge::active_session_count() > 0 {
+                    api.prevent_exit();
+                    write_app_log(
+                        app,
+                        "app.shutdown.deferred",
+                        "Last window closed but browser sessions are still active",
+                    );
+                } else if code.is_none() {
+                    write_app_log(app, "app.shutdown", "Last window closed; shutting down");
+                }
+            }
+        });
 }

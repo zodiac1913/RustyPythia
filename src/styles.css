@@ -1186,6 +1186,21 @@ button:focus-visible {
   color: #7a402d;
 }
 
+.launch-msg {
+  flex-basis: 100%;
+  min-height: 20px;
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+}
+
+.launch-msg[data-state="error"] {
+  color: #b42318;
+}
+
+.launch-msg[data-state="success"] {
+  color: #7a402d;
+}
+
 .app-shell__footer {
   display: flex;
   align-items: center;
@@ -1632,6 +1647,14 @@ button:focus-visible {
   }
 
   #launcher-msg[data-state="error"] {
+    color: #ff8b8b;
+  }
+
+  .launch-msg[data-state="success"] {
+    color: #e5a088;
+  }
+
+  .launch-msg[data-state="error"] {
     color: #ff8b8b;
   }
 

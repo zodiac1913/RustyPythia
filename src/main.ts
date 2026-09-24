@@ -41,13 +41,12 @@ type BrowserSqlModule = {
   Database: new (data?: Uint8Array) => BrowserSqlDatabase;
 };
 
-let launcherUrlEl: HTMLInputElement | null;
 let launcherMsgEl: HTMLElement | null;
 let openTauriButtonEl: HTMLButtonElement | null;
 let openBrowserButtonEl: HTMLButtonElement | null;
 let launchMenuButtonEl: HTMLButtonElement | null;
 let launchMenuEl: HTMLElement | null;
-let footerBrowserLinkEl: HTMLButtonElement | null;
+let launchMsgEl: HTMLElement | null;
 let databaseSelectorEl: HTMLSelectElement | null;
 let toggleFavoriteDatabaseEl: HTMLButtonElement | null;
 let workspaceDbPathEl: HTMLElement | null;
@@ -105,7 +104,6 @@ let presetFormEl: HTMLFormElement | null;
 let presetIdEl: HTMLInputElement | null;
 let presetNameEl: HTMLInputElement | null;
 let presetEngineEl: HTMLSelectElement | null;
-let presetLaunchUrlEl: HTMLInputElement | null;
 let presetHostEl: HTMLInputElement | null;
 let presetPortEl: HTMLInputElement | null;
 let presetDatabaseEl: HTMLInputElement | null;
@@ -767,16 +765,128 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
   }
 }
 
-async function invokeBackend<T>(command: string, args?: Record<string, unknown>) {
-  if (!hasTauriBackend()) {
-    return browserInvoke<T>(command, args);
+/// Connection details for the desktop app's loopback SQL bridge.
+///
+/// A browser session that was launched from the app carries these in its URL.
+/// With them the page runs SQL through the real drivers in Rust; without them
+/// it degrades to the local SQLite workspace.
+type SqlBridge = { port: number; token: string };
+
+const BRIDGE_STORAGE_KEY = "rustyPythia.bridge";
+
+function readSqlBridge(): SqlBridge | null {
+  const params = new URLSearchParams(window.location.search);
+  const port = Number(params.get("bridge"));
+  const token = params.get("token");
+
+  if (port > 0 && token) {
+    const bridge = { port, token } satisfies SqlBridge;
+    window.sessionStorage.setItem(BRIDGE_STORAGE_KEY, JSON.stringify(bridge));
+    // The token should not linger in the address bar where it can be copied
+    // into a bug report or shared screenshot.
+    params.delete("bridge");
+    params.delete("token");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    return bridge;
   }
 
-  return invoke<T>(command, args);
+  try {
+    const stored = window.sessionStorage.getItem(BRIDGE_STORAGE_KEY);
+    return stored ? (JSON.parse(stored) as SqlBridge) : null;
+  } catch {
+    return null;
+  }
+}
+
+let sqlBridge: SqlBridge | null = null;
+
+/// Tells the desktop app this browser session is alive.
+///
+/// The app shuts down once nothing is using it, and a browser tab is not a
+/// window it can see. Without this pulse a tab left open would be ignored and
+/// the backend would exit out from under it.
+function startBridgeHeartbeat(bridge: SqlBridge) {
+  const sessionId = crypto.randomUUID();
+  const endpoint = `http://127.0.0.1:${bridge.port}/api/session`;
+
+  const ping = (closing: boolean) => {
+    const body = JSON.stringify({ sessionId, closing });
+
+    // An unload handler cannot await fetch, so the farewell goes out as a
+    // keepalive request that survives the page going away.
+    void fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${bridge.token}`,
+      },
+      body,
+      keepalive: true,
+    }).catch(() => undefined);
+  };
+
+  ping(false);
+  const timer = window.setInterval(() => ping(false), 5000);
+
+  window.addEventListener("pagehide", () => {
+    window.clearInterval(timer);
+    ping(true);
+  });
+}
+
+async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>) {
+  if (!sqlBridge) {
+    throw new Error("No SQL bridge available.");
+  }
+
+  const route =
+    command === "execute_sql_query"
+      ? "query"
+      : command === "load_sql_schema"
+        ? "schema"
+        : "presets";
+  const response = await fetch(`http://127.0.0.1:${sqlBridge.port}/api/${route}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${sqlBridge.token}`,
+    },
+    body: JSON.stringify(args ?? {}),
+  });
+
+  if (!response.ok) {
+    throw new Error((await response.text()) || `SQL bridge returned ${response.status}.`);
+  }
+
+  return (await response.json()) as T;
+}
+
+async function invokeBackend<T>(command: string, args?: Record<string, unknown>) {
+  if (hasTauriBackend()) {
+    return invoke<T>(command, args);
+  }
+
+  // Only the database commands cross the bridge; everything else stays local
+  // to the browser preview.
+  const BRIDGED = ["execute_sql_query", "load_sql_schema", "load_preset_store"];
+  if (sqlBridge && BRIDGED.includes(command)) {
+    return bridgeInvoke<T>(command, args);
+  }
+
+  return browserInvoke<T>(command, args);
 }
 
 function applyRuntimeAvailabilityState() {
   if (hasTauriBackend()) {
+    return;
+  }
+
+  // A bridged session still has the desktop app behind it, so only the
+  // features that have no bridge route are switched off.
+  if (sqlBridge) {
+    testPresetButtonEl?.toggleAttribute("disabled", true);
+    setLauncherMessage("Connected to the desktop SQL bridge. Queries run against your real connections.");
     return;
   }
 
@@ -1063,6 +1173,19 @@ function setLauncherMessage(message: string, isError = false) {
 
   launcherMsgEl.textContent = message;
   launcherMsgEl.dataset.state = isError ? "error" : "success";
+}
+
+/// Feedback for the external app launcher, which lives in its own card. The
+/// workspace status line is too far away to be noticed from down here, so a
+/// failed launch would otherwise look like the button did nothing at all.
+function setLaunchMessage(message: string, isError = false) {
+  if (!launchMsgEl) {
+    setLauncherMessage(message, isError);
+    return;
+  }
+
+  launchMsgEl.textContent = message;
+  launchMsgEl.dataset.state = isError ? "error" : "success";
 }
 
 function readStoredPresets() {
@@ -1484,7 +1607,7 @@ async function populateQuerySearchResults(entries: SqlMemoryEntry[]) {
   querySearchResultsEl.innerHTML = entries
     .map(
       (entry) => `
-      <div class="query-search-result-item" data-query-text="${escapeHtml(entry.squerrlStatement || entry.statement)}" data-query-language="${entry.squerrlStatement ? "squerrl" : "sql"}">
+      <div class="query-search-result-item" data-query-text="${escapeHtml(entry.statement)}" data-query-language="sql">
         ${entry.squerrlStatement ? `<p class="query-search-result-item__text"><strong>SQuerL:</strong> ${escapeHtml(entry.squerrlStatement)}</p>` : ""}
         <p class="query-search-result-item__text"><strong>SQL:</strong> ${escapeHtml(entry.statement)}</p>
         <p class="query-search-result-item__meta">Used ${entry.executionCount} time${entry.executionCount === 1 ? "" : "s"} · Last: ${entry.lastSeenAt}</p>
@@ -1551,13 +1674,14 @@ function populateSavedQueriesDropdown(entries: SqlMemoryEntry[]) {
   // Add entries as options
   entries.forEach((entry) => {
     const option = document.createElement("option");
-    const displayQuery = entry.squerrlStatement || entry.statement;
-    option.value = displayQuery;
-    option.dataset.queryLanguage = entry.squerrlStatement ? "squerrl" : "sql";
+    // Saved queries always load as SQL; the SQuerL that produced them is kept
+    // as a tooltip hint only.
+    option.value = entry.statement;
+    option.dataset.queryLanguage = "sql";
     option.title = entry.squerrlStatement
       ? `SQuerL: ${entry.squerrlStatement}\nSQL: ${entry.statement}`
       : entry.statement;
-    option.textContent = displayQuery.substring(0, 60) + (displayQuery.length > 60 ? "..." : "");
+    option.textContent = entry.statement.substring(0, 60) + (entry.statement.length > 60 ? "..." : "");
     savedQueryDropdownEl!.appendChild(option);
   });
 }
@@ -2420,7 +2544,6 @@ function populatePresetForm(preset: ConnectionPreset | null) {
     !presetIdEl ||
     !presetNameEl ||
     !presetEngineEl ||
-    !presetLaunchUrlEl ||
     !presetHostEl ||
     !presetPortEl ||
     !presetDatabaseEl ||
@@ -2435,7 +2558,6 @@ function populatePresetForm(preset: ConnectionPreset | null) {
   presetIdEl.value = preset?.id ?? "";
   presetNameEl.value = preset?.name ?? "";
   presetEngineEl.value = preset?.engine ?? "mssql";
-  presetLaunchUrlEl.value = preset?.launchUrl ?? "";
   presetHostEl.value = preset?.host ?? "";
   presetPortEl.value = preset?.port ?? "";
   presetDatabaseEl.value = preset?.database ?? "";
@@ -2510,19 +2632,11 @@ async function deleteActiveConnection() {
     activePresetId = null;
     await persistPresetStore();
     renderPresetList();
-    syncLauncherUrlToActivePreset();
     void refreshSavedQueries();
     setLauncherMessage(`Deleted connection ${preset.name}.`);
     void recordAppEvent("ui.connection.delete", `Deleted external connection ${preset.name}`);
   } catch (error) {
     setLauncherMessage(error instanceof Error ? error.message : String(error), true);
-  }
-}
-
-function syncLauncherUrlToActivePreset() {
-  const preset = getPresetById(activePresetId);
-  if (launcherUrlEl && preset?.launchUrl) {
-    launcherUrlEl.value = preset.launchUrl;
   }
 }
 
@@ -2545,7 +2659,6 @@ function readPresetForm(): ConnectionPreset {
   if (
     !presetNameEl ||
     !presetEngineEl ||
-    !presetLaunchUrlEl ||
     !presetHostEl ||
     !presetPortEl ||
     !presetDatabaseEl ||
@@ -2563,23 +2676,11 @@ function readPresetForm(): ConnectionPreset {
     throw new Error("Connection name is required.");
   }
 
-  const launchUrl = presetLaunchUrlEl.value.trim();
-  if (launchUrl) {
-    try {
-      const parsedUrl = new URL(launchUrl);
-      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-        throw new Error("Preferred SQL app URL must start with http:// or https://.");
-      }
-    } catch {
-      throw new Error("Preferred SQL app URL must start with http:// or https://.");
-    }
-  }
-
   return {
     id: presetIdEl.value || crypto.randomUUID(),
     name,
     engine: presetEngineEl.value as PresetEngine,
-    launchUrl,
+    launchUrl: "",
     host: presetHostEl.value.trim(),
     port: presetPortEl.value.trim(),
     database: presetDatabaseEl.value.trim(),
@@ -2610,7 +2711,6 @@ async function savePreset(event: SubmitEvent) {
     activePresetId = preset.id;
     await persistPresetStore();
     renderPresetList();
-    syncLauncherUrlToActivePreset();
     void refreshSavedQueries();
     setLauncherMessage(`Saved external connection ${preset.name}.`);
     closeConnectionModal();
@@ -2620,37 +2720,10 @@ async function savePreset(event: SubmitEvent) {
   }
 }
 
-function getTargetUrl() {
-  if (!launcherUrlEl) {
-    throw new Error("Launcher URL input is unavailable.");
-  }
-
-  const value = launcherUrlEl.value.trim();
-  if (!value) {
-    throw new Error("Enter a SQL app URL first.");
-  }
-
-  let parsedUrl: URL;
-
-  try {
-    parsedUrl = new URL(value);
-  } catch {
-    throw new Error("Use a full URL starting with http:// or https://.");
-  }
-
-  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-    throw new Error("Only http:// and https:// URLs are supported.");
-  }
-
-  return parsedUrl.toString();
-}
-
 function setLauncherBusy(isBusy: boolean) {
   openTauriButtonEl?.toggleAttribute("disabled", isBusy);
   openBrowserButtonEl?.toggleAttribute("disabled", isBusy);
   launchMenuButtonEl?.toggleAttribute("disabled", isBusy);
-  footerBrowserLinkEl?.toggleAttribute("disabled", isBusy);
-  launcherUrlEl?.toggleAttribute("aria-busy", isBusy);
 }
 
 function setPresetBusy(isBusy: boolean) {
@@ -2900,27 +2973,44 @@ async function runSql() {
   }
 }
 
-async function openSqlApp(mode: "tauri" | "browser") {
+/// Opens another Rusty Pythia workspace, either as a second native window or
+/// as a browser session wired to the desktop app's SQL bridge.
+async function openWorkspaceSession(mode: "tauri" | "browser") {
   try {
-    const targetUrl = getTargetUrl();
     setLauncherBusy(true);
+    setLaunchMenuOpen(false);
 
-    if (mode === "tauri") {
-      setLaunchMenuOpen(false);
-      await invokeBackend("open_sql_window", { url: targetUrl });
-      setLauncherMessage(`Opened ${targetUrl} in a new Tauri window.`);
-      void recordAppEvent("ui.launch.tauri", `Opened SQL app in a Tauri window for ${targetUrl}`);
+    // A native window loads the bundled UI directly, so it gets a full Tauri
+    // context instead of being treated as an untrusted remote origin.
+    if (mode === "tauri" && hasTauriBackend()) {
+      await invoke("open_workspace_window");
+      setLaunchMessage("Opened a second Rusty Pythia workspace window.");
+      void recordAppEvent("ui.workspace.tauri", "Opened a second workspace window");
       return;
     }
 
-    setLaunchMenuOpen(false);
-    await openUrl(targetUrl);
-    setLauncherMessage(`Opened ${targetUrl} in your default browser.`);
-    void recordAppEvent("ui.launch.browser", `Opened SQL app in the default browser for ${targetUrl}`);
+    // A bridged session has no Tauri API of its own, so it reuses the bridge
+    // details it was handed rather than asking the backend for them.
+    const info = hasTauriBackend() ? await invoke<SqlBridge>("get_bridge_info") : sqlBridge;
+    if (!info) {
+      throw new Error("The SQL bridge is not available in this session.");
+    }
+
+    const target = `http://127.0.0.1:${info.port}/?bridge=${info.port}&token=${encodeURIComponent(info.token)}`;
+
+    if (!hasTauriBackend()) {
+      window.open(target, "_blank", "noopener,noreferrer");
+      setLaunchMessage("Opened another Rusty Pythia workspace session.");
+      return;
+    }
+
+    await openUrl(target);
+    setLaunchMessage("Opened a Rusty Pythia workspace in your browser.");
+    void recordAppEvent("ui.workspace.browser", "Opened a workspace session in the browser");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    setLauncherMessage(message, true);
-    void recordAppEvent("ui.launch.error", `Failed to open SQL app in ${mode} mode: ${message}`);
+    setLaunchMessage(message, true);
+    void recordAppEvent("ui.workspace.error", `Failed to open a workspace session: ${message}`);
   } finally {
     setLauncherBusy(false);
   }
@@ -2934,14 +3024,17 @@ function initializeApp() {
   }
 
   hasInitializedApp = true;
+  sqlBridge = readSqlBridge();
+  if (sqlBridge && !hasTauriBackend()) {
+    startBridgeHeartbeat(sqlBridge);
+  }
 
-  launcherUrlEl = document.querySelector("#launcher-url");
   launcherMsgEl = document.querySelector("#launcher-msg");
   openTauriButtonEl = document.querySelector("#open-tauri-button");
   openBrowserButtonEl = document.querySelector("#open-browser-button");
   launchMenuButtonEl = document.querySelector("#launch-menu-button");
   launchMenuEl = document.querySelector("#launch-menu");
-  footerBrowserLinkEl = document.querySelector("#footer-browser-link");
+  launchMsgEl = document.querySelector("#launch-msg");
   databaseSelectorEl = document.querySelector("#database-selector");
   toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
   workspaceDbPathEl = document.querySelector("#workspace-db-path");
@@ -2988,7 +3081,6 @@ function initializeApp() {
   presetIdEl = document.querySelector("#preset-id");
   presetNameEl = document.querySelector("#preset-name");
   presetEngineEl = document.querySelector("#preset-engine");
-  presetLaunchUrlEl = document.querySelector("#preset-launch-url");
   presetHostEl = document.querySelector("#preset-host");
   presetPortEl = document.querySelector("#preset-port");
   presetDatabaseEl = document.querySelector("#preset-database");
@@ -3036,7 +3128,6 @@ function initializeApp() {
           activePresetId = legacyStore.activePresetId;
           await persistPresetStore();
           renderPresetList();
-          syncLauncherUrlToActivePreset();
           void refreshSavedQueries();
           setLauncherMessage("Migrated existing presets into Rusty Pythia storage.");
           return;
@@ -3046,7 +3137,6 @@ function initializeApp() {
       connectionPresets = store.presets;
       activePresetId = store.activePresetId;
       renderPresetList();
-      syncLauncherUrlToActivePreset();
       // Deliberately no password-status probe here: connecting at startup
       // reads the Keychain and makes macOS ask for the login password before
       // the user has asked for anything. It runs after the first query instead.
@@ -3057,9 +3147,8 @@ function initializeApp() {
       setLauncherMessage(message, true);
     });
 
-  document.querySelector("#launcher-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void openSqlApp("tauri");
+  openTauriButtonEl?.addEventListener("click", () => {
+    void openWorkspaceSession("tauri");
   });
 
   sqlEditorFormEl?.addEventListener("submit", (event) => {
@@ -3337,7 +3426,6 @@ function initializeApp() {
     }
 
     void persistPresetStore();
-    syncLauncherUrlToActivePreset();
     void refreshSavedQueries();
     updateDatabaseSelector();
     setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
@@ -3355,7 +3443,6 @@ function initializeApp() {
       // Switch to internal as default
       activePresetId = null;
       void persistPresetStore();
-      syncLauncherUrlToActivePreset();
       void refreshSavedQueries();
       updateDatabaseSelector();
       setLauncherMessage("Internal workspace database is now your default.");
@@ -3462,11 +3549,7 @@ function initializeApp() {
   });
 
   openBrowserButtonEl?.addEventListener("click", () => {
-    void openSqlApp("browser");
-  });
-
-  footerBrowserLinkEl?.addEventListener("click", () => {
-    void openSqlApp("browser");
+    void openWorkspaceSession("browser");
   });
 
   document.addEventListener("click", (event) => {

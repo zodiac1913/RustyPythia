@@ -117,24 +117,14 @@
 
 
           <section class="info-card info-card--inline" aria-labelledby="launch-tools-title">
-            <form class="launcher-form launcher-form--inline" id="launcher-form">
+            <div class="launcher-form launcher-form--inline">
               <h2
                 id="launch-tools-title"
                 class="launcher-form__title"
-                title="Open a separate SQL app in a Tauri window or your browser. This is secondary to the SQL workspace above."
+                title="Open another Rusty Pythia workspace in a native window or your browser."
               >
-                External Additional App
+                Additional SQL Window
               </h2>
-              <label class="visually-hidden" for="launcher-url">SQL app URL to open</label>
-              <input
-                id="launcher-url"
-                type="url"
-                inputmode="url"
-                placeholder="https://sql-app.example"
-                title="URL of the external SQL app to open. A saved connection can fill this in for you."
-                autocomplete="off"
-                spellcheck="false"
-              />
               <div class="launcher-menu">
                 <button
                   type="button"
@@ -142,12 +132,12 @@
                   aria-haspopup="menu"
                   aria-expanded="false"
                   aria-controls="launch-menu"
-                  title="Choose where to open the SQL app URL"
+                  title="Open another Rusty Pythia workspace"
                 >
                   Launch SQL App
                 </button>
                 <div class="launch-menu" id="launch-menu" role="menu" hidden>
-                  <button type="submit" role="menuitem" id="open-tauri-button">
+                  <button type="button" role="menuitem" id="open-tauri-button">
                     Open in Tauri Window
                   </button>
                   <button type="button" role="menuitem" id="open-browser-button">
@@ -160,14 +150,12 @@
                 id="launch-help-button"
                 class="launcher-help"
                 title="What is this for?"
-                aria-label="What is External Additional App for?"
+                aria-label="What is Additional SQL Window for?"
               >
                 ?
               </button>
-            </form>
-            <button type="button" class="footer-link" id="footer-browser-link">
-              Prefer a browser session? Open the web version.
-            </button>
+              <p id="launch-msg" class="launch-msg" aria-live="polite"></p>
+            </div>
           </section>
         </div>
 
@@ -196,20 +184,19 @@
     <dialog id="launcher-help-modal" class="launcher-modal" aria-labelledby="launcher-help-title">
       <div class="launcher-modal__body">
         <div class="preset-list__header">
-          <h2 id="launcher-help-title">About External Additional App</h2>
+          <h2 id="launcher-help-title">About Additional SQL Window</h2>
           <button type="button" class="footer-link" id="close-launcher-help-button">Close</button>
         </div>
 
         <p class="section-note">
-          This launcher is secondary; the SQL workspace above is the main surface. Use it
-          to open a completely separate SQL app in its own window, which is handy when you
-          want a second tool side by side with Rusty Pythia.
+          Opens a second Rusty Pythia workspace so you can work in two places at once.
+          Nothing to fill in: the app picks a free loopback port and hands the new session
+          a one-time token.
         </p>
         <p class="section-note">
-          Enter the app's full <code>http://</code> or <code>https://</code> URL, then pick
-          <strong>Open in Tauri Window</strong> for a native window or
-          <strong>Open in Browser</strong> for your default browser. The URL stands on its
-          own, though a saved connection can optionally fill it in for you.
+          <strong>Open in Tauri Window</strong> gives you a native window.
+          <strong>Open in Browser</strong> opens your default browser. Either way the
+          session runs queries through this app, so your saved connections work the same.
         </p>
       </div>
     </dialog>
@@ -232,14 +219,6 @@
           <option value="postgres">Postgres</option>
           <option value="sqlite">SQLite</option>
         </select>
-
-        <label for="preset-launch-url">Preferred SQL app URL</label>
-        <input
-          id="preset-launch-url"
-          type="url"
-          inputmode="url"
-          placeholder="Optional: https://sql-app.example"
-        />
 
         <label for="preset-host">Server host or SQLite file</label>
         <input id="preset-host" type="text" placeholder="localhost or /path/db.sqlite" />
