@@ -55,6 +55,25 @@ jobs:
 
       - run: npm ci
 
+      # Tauri needs semver, so tag YYYY.MM.DD.xx becomes YYYY.M.D+xx; the
+      # Windows installer and macOS build number turn that back into YYYY.M.D.xx.
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.GITHUB_REF_NAME;
+            const match = /^(\d{4})\.(\d{2})\.(\d{2})\.(\d+)$/.exec(tag);
+            if (!match) throw new Error(`Tag ${tag} is not YYYY.MM.DD.xx`);
+            const [year, month, day, attempt] = match.slice(1).map(Number);
+            const path = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(path, "utf8"));
+            config.version = `${year}.${month}.${day}+${attempt}`;
+            config.bundle.macOS.bundleVersion = `${year}.${month}.${day}.${attempt}`;
+            fs.writeFileSync(path, JSON.stringify(config, null, 2));
+            console.log(`Stamped ${config.version} (${config.bundle.macOS.bundleVersion})`);
+          '
+
       - name: Build and publish release assets
         uses: tauri-apps/tauri-action@v0
         env:
@@ -63,7 +82,12 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Rusty Pythia ${{ github.ref_name }}
           releaseBody: |
-            Installers for macOS, Windows, and Linux are attached below.
-            These builds are unsigned.
+            Installers for macOS (Apple Silicon), Windows, and Linux are attached below.
+
+            macOS: the app is not notarized. If macOS blocks it, open
+            System Settings → Privacy & Security → Open Anyway, or run
+            `xattr -dr com.apple.quarantine "/Applications/Rusty Pythia.app"`.
+
+            Windows: the installer is unsigned, so SmartScreen may warn on first run.
           releaseDraft: false
           prerelease: false

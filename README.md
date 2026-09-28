@@ -36,8 +36,20 @@ git tag 2026.09.28.0
 git push origin 2026.09.28.0
 ```
 
-The resulting GitHub release contains unsigned installers; users may see platform
-security prompts when opening them.
+Installers are stamped with the tag's version (for example, tag `2026.09.28.2` becomes
+`2026.9.28+2`, shown by the Windows installer as `2026.9.28.2`). Builds are produced for
+macOS (`.dmg`, Apple Silicon), Windows (`-setup.exe`), and Linux (`.AppImage`, `.deb`,
+`.rpm`). There is no MSI because MSI versions cannot start with a number above 255.
+
+The macOS app is ad-hoc signed but not notarized. On first launch, macOS will say it
+cannot verify the developer; approve it under **System Settings → Privacy & Security →
+Open Anyway**, or clear the download quarantine:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Rusty Pythia.app"
+```
+
+The Windows installer is unsigned, so SmartScreen may warn on first run.
 
 ### SQuerL
 
