@@ -55,7 +55,6 @@ let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
 let queryLanguageEl: HTMLSelectElement | null;
-let savedQueryDropdownEl: HTMLSelectElement | null;
 let querySearchButtonEl: HTMLButtonElement | null;
 let appLogButtonEl: HTMLButtonElement | null;
 let runSqlButtonEl: HTMLButtonElement | null;
@@ -1650,42 +1649,6 @@ async function loadQueryFromSearch() {
   return true;
 }
 
-async function refreshSavedQueries() {
-  try {
-    const entries = await invokeBackend<SqlMemoryEntry[]>("load_sql_memory", {
-      connectionId: getActiveConnectionId(),
-      limit: 100,
-    });
-    populateSavedQueriesDropdown(entries);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    setLauncherMessage(message, true);
-  }
-}
-
-function populateSavedQueriesDropdown(entries: SqlMemoryEntry[]) {
-  if (!savedQueryDropdownEl) {
-    return;
-  }
-
-  // Reset dropdown to default option only
-  savedQueryDropdownEl.innerHTML = '<option value="">Load a saved query...</option>';
-
-  // Add entries as options
-  entries.forEach((entry) => {
-    const option = document.createElement("option");
-    // Saved queries always load as SQL; the SQuerL that produced them is kept
-    // as a tooltip hint only.
-    option.value = entry.statement;
-    option.dataset.queryLanguage = "sql";
-    option.title = entry.squerrlStatement
-      ? `SQuerL: ${entry.squerrlStatement}\nSQL: ${entry.statement}`
-      : entry.statement;
-    option.textContent = entry.statement.substring(0, 60) + (entry.statement.length > 60 ? "..." : "");
-    savedQueryDropdownEl!.appendChild(option);
-  });
-}
-
 function populateAppLogKindFilter(entries: AppLogEntry[]) {
   if (!appLogKindFilterEl) {
     return;
@@ -2197,7 +2160,7 @@ function renderSQuerrlPicker(
 
   squerrlSelectedIndex = 0;
   squerrlPickerEl.setAttribute("aria-label", `${title}. ${status}`);
-  squerrlPickerEl.innerHTML = `${showSortControl ? '<label class="squerrl-picker__sort" for="squerrl-sort-order"><span>Sort</span><select id="squerrl-sort-order" aria-label="Optional SQuerL sort order"><option value="">NO SORT</option><option value="~up ">~up</option><option value="~down ">~down</option></select></label>' : ""}${tableFilterMarkup}<input id="squerrl-table-search" class="squerrl-picker__search" type="search" placeholder="Filter suggestions" autocomplete="off" aria-label="Filter suggestions" /><div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerrl</span><h3 id="squerrl-picker-title"></h3></div><span id="squerrl-picker-status" class="squerrl-picker__status"></span></div><div id="squerrl-picker-options" class="squerrl-picker__options"></div>`;
+  squerrlPickerEl.innerHTML = `${showSortControl ? '<label class="squerrl-picker__sort" for="squerrl-sort-order"><span>Sort</span><select id="squerrl-sort-order" aria-label="Optional SQuerL sort order"><option value="">NO SORT</option><option value="~up ">~up</option><option value="~down ">~down</option></select></label>' : ""}${tableFilterMarkup}<input id="squerrl-table-search" class="squerrl-picker__search" type="search" placeholder="Filter Suggestions  (F4)" autocomplete="off" aria-label="Filter suggestions" /><div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerrl</span><h3 id="squerrl-picker-title"></h3></div><span id="squerrl-picker-status" class="squerrl-picker__status"></span></div><div id="squerrl-picker-options" class="squerrl-picker__options"></div>`;
   const pickerTitleEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-title");
   const pickerStatusEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-status");
   const pickerOptionsEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-picker-options");
@@ -2632,7 +2595,6 @@ async function deleteActiveConnection() {
     activePresetId = null;
     await persistPresetStore();
     renderPresetList();
-    void refreshSavedQueries();
     setLauncherMessage(`Deleted connection ${preset.name}.`);
     void recordAppEvent("ui.connection.delete", `Deleted external connection ${preset.name}`);
   } catch (error) {
@@ -2643,7 +2605,6 @@ async function deleteActiveConnection() {
 function useInternalWorkspaceAsDefault() {
   activePresetId = null;
   renderPresetList();
-  void refreshSavedQueries();
   setLauncherMessage("Internal workspace database is now the default.");
   void persistPresetStore().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -2711,7 +2672,6 @@ async function savePreset(event: SubmitEvent) {
     activePresetId = preset.id;
     await persistPresetStore();
     renderPresetList();
-    void refreshSavedQueries();
     setLauncherMessage(`Saved external connection ${preset.name}.`);
     closeConnectionModal();
   } catch (error) {
@@ -2957,7 +2917,6 @@ async function runSql() {
       });
     }
 
-    await refreshSavedQueries();
     setLauncherMessage(result.message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -3043,7 +3002,6 @@ function initializeApp() {
   sqlEditorFormEl = document.querySelector("#sql-editor-form");
   sqlEditorEl = document.querySelector("#sql-editor");
   queryLanguageEl = document.querySelector("#query-language");
-  savedQueryDropdownEl = document.querySelector("#saved-query-dropdown");
   querySearchButtonEl = document.querySelector("#query-search-button");
   appLogButtonEl = document.querySelector("#app-log-button");
   runSqlButtonEl = document.querySelector("#run-sql-button");
@@ -3111,7 +3069,6 @@ function initializeApp() {
     .then((info) => {
       workspaceDatabaseInfo = info;
       renderWorkspaceDatabaseInfo();
-      void refreshSavedQueries();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -3128,7 +3085,6 @@ function initializeApp() {
           activePresetId = legacyStore.activePresetId;
           await persistPresetStore();
           renderPresetList();
-          void refreshSavedQueries();
           setLauncherMessage("Migrated existing presets into Rusty Pythia storage.");
           return;
         }
@@ -3140,7 +3096,6 @@ function initializeApp() {
       // Deliberately no password-status probe here: connecting at startup
       // reads the Keychain and makes macOS ask for the login password before
       // the user has asked for anything. It runs after the first query instead.
-      void refreshSavedQueries();
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -3333,21 +3288,6 @@ function initializeApp() {
     void renewMssqlPassword(event);
   });
 
-  savedQueryDropdownEl?.addEventListener("change", (event) => {
-    const target = event.target as HTMLSelectElement;
-    const query = target.value;
-    const selectedOption = target.selectedOptions[0];
-    const queryLanguage = (selectedOption?.dataset.queryLanguage as QueryLanguage | undefined) ?? "sql";
-
-    if (query && sqlEditorEl) {
-      sqlEditorEl.value = query;
-      setEditorLanguage(queryLanguage);
-      setLauncherMessage("Query loaded into workspace.");
-      void recordAppEvent("ui.query.load.saved", `Loaded a saved ${queryLanguage === "squerrl" ? "SQuerL" : "SQL"} statement from the dropdown`);
-      target.value = ""; // Reset dropdown
-    }
-  });
-
   querySearchButtonEl?.addEventListener("click", () => {
     openQuerySearchModal();
     void performQuerySearch();
@@ -3426,7 +3366,6 @@ function initializeApp() {
     }
 
     void persistPresetStore();
-    void refreshSavedQueries();
     updateDatabaseSelector();
     setLauncherMessage(`Switched to database: ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
     void recordAppEvent("ui.database.switch", `Switched active database target to ${databaseSelectorEl!.options[databaseSelectorEl!.selectedIndex].text}`);
@@ -3443,7 +3382,6 @@ function initializeApp() {
       // Switch to internal as default
       activePresetId = null;
       void persistPresetStore();
-      void refreshSavedQueries();
       updateDatabaseSelector();
       setLauncherMessage("Internal workspace database is now your default.");
       void recordAppEvent("ui.database.default", "Set the internal workspace database as the default target");
@@ -3625,6 +3563,12 @@ function initializeApp() {
         return;
       }
       void runSql();
+      return;
+    }
+    if (event.key === "F4") {
+      event.preventDefault();
+      squerrlTableSearchEl?.focus();
+      squerrlTableSearchEl?.select();
       return;
     }
     if (event.key === "F8") {

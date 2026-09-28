@@ -23,6 +23,7 @@ The query mode selector offers three choices:
 - **Non Assist** is a free-form query box with no suggestions or picker behavior.
 
 All three modes execute the resulting statement as SQL against the selected database.
+Use **Query Search** to find and load previously executed statements into the editor.
 
 ### SQuerL
 

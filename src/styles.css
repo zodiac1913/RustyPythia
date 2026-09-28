@@ -510,18 +510,11 @@ body::after {
   /* Layout handled by Bootstrap: d-flex align-items-center gap-2 ms-auto flex-shrink-0 */
 }
 
-.saved-query-dropdown {
-  /* Styled via Bootstrap form-select form-select-sm classes with rusty overrides */
-}
-
 .query-language {
   min-width: 112px;
 }
 
-.query-search-button {
-  /* Styled via Bootstrap btn btn-sm btn-outline-primary classes with rusty overrides */
-}
-
+#query-search-button,
 #app-log-button {
   white-space: nowrap;
 }

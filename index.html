@@ -45,11 +45,7 @@
                     <option value="sql">SQL Assist</option>
                     <option value="freeform">Non Assist</option>
                   </select>
-                  <select id="saved-query-dropdown" class="saved-query-dropdown form-select form-select-sm" style="min-width: 200px" aria-label="Load saved query" title="Select a saved query to load">
-                    <option value="">Load a saved query...</option>
-                  </select>
                   <button type="button" id="query-search-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="Search saved queries" title="Search and filter saved queries by date">Query Search</button>
-                  <button type="button" id="app-log-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="View application log" title="View application log and audit events">App Log</button>
                 </div>
               </div>
               <textarea
@@ -155,6 +151,9 @@
                 ?
               </button>
               <p id="launch-msg" class="launch-msg" aria-live="polite"></p>
+            </div>
+            <div class="mt-2">
+              <button type="button" id="app-log-button" class="btn btn-sm btn-outline-primary" aria-label="View application log" title="View application log and audit events">App Log</button>
             </div>
           </section>
         </div>
