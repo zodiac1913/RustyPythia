@@ -116,6 +116,86 @@ body::after {
   box-shadow: 0 0 0 0.25rem rgba(177, 88, 61, 0.25) !important;
 }
 
+/* Themed Bootstrap buttons. Surfaces are opaque (no blur or translucency) so
+   text contrast is deterministic and meets WCAG AA in both colour schemes. */
+.btn.btn-rusty,
+.btn.btn-rusty-primary {
+  --bs-btn-font-weight: 600;
+  --bs-btn-focus-shadow-rgb: 139, 69, 48;
+  --bs-btn-disabled-opacity: 0.55;
+  width: auto;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.btn.btn-rusty {
+  --bs-btn-color: #201514;
+  --bs-btn-bg: #fffaf8;
+  --bs-btn-border-color: #8b4530;
+  --bs-btn-hover-color: #6f3625;
+  --bs-btn-hover-bg: #f6e3dc;
+  --bs-btn-hover-border-color: #6f3625;
+  --bs-btn-active-color: #ffffff;
+  --bs-btn-active-bg: #8b4530;
+  --bs-btn-active-border-color: #8b4530;
+  --bs-btn-disabled-color: #201514;
+  --bs-btn-disabled-bg: #fffaf8;
+  --bs-btn-disabled-border-color: #8b4530;
+}
+
+.btn.btn-rusty-primary {
+  --bs-btn-color: #ffffff;
+  --bs-btn-bg: #8b4530;
+  --bs-btn-border-color: #8b4530;
+  --bs-btn-hover-color: #ffffff;
+  --bs-btn-hover-bg: #6f3625;
+  --bs-btn-hover-border-color: #6f3625;
+  --bs-btn-active-color: #ffffff;
+  --bs-btn-active-bg: #5a2c1e;
+  --bs-btn-active-border-color: #5a2c1e;
+  --bs-btn-disabled-color: #ffffff;
+  --bs-btn-disabled-bg: #8b4530;
+  --bs-btn-disabled-border-color: #8b4530;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn.btn-rusty,
+  .btn.btn-rusty-primary {
+    --bs-btn-focus-shadow-rgb: 229, 160, 136;
+  }
+
+  .btn.btn-rusty {
+    --bs-btn-color: #f8f2f0;
+    --bs-btn-bg: #2b1a17;
+    --bs-btn-border-color: #e5a088;
+    --bs-btn-hover-color: #ffffff;
+    --bs-btn-hover-bg: #43271f;
+    --bs-btn-hover-border-color: #f0c2ae;
+    --bs-btn-active-color: #1f1615;
+    --bs-btn-active-bg: #e5a088;
+    --bs-btn-active-border-color: #e5a088;
+    --bs-btn-disabled-color: #f8f2f0;
+    --bs-btn-disabled-bg: #2b1a17;
+    --bs-btn-disabled-border-color: #e5a088;
+  }
+
+  .btn.btn-rusty-primary {
+    --bs-btn-color: #1f1615;
+    --bs-btn-bg: #e5a088;
+    --bs-btn-border-color: #e5a088;
+    --bs-btn-hover-color: #1f1615;
+    --bs-btn-hover-bg: #f0c2ae;
+    --bs-btn-hover-border-color: #f0c2ae;
+    --bs-btn-active-color: #1f1615;
+    --bs-btn-active-bg: #d07a5f;
+    --bs-btn-active-border-color: #d07a5f;
+    --bs-btn-disabled-color: #1f1615;
+    --bs-btn-disabled-bg: #e5a088;
+    --bs-btn-disabled-border-color: #e5a088;
+  }
+}
+
 .container {
   position: relative;
   z-index: 1;
@@ -484,9 +564,11 @@ body::after {
   min-width: 0;
 }
 
-.launcher-help {
+.launcher-help,
+.btn.launcher-help {
   flex-shrink: 0;
   width: 2rem;
+  aspect-ratio: 1;
   padding: 0;
   border-radius: 50%;
   text-align: center;
@@ -731,12 +813,6 @@ body::after {
 
 .sql-results-export {
   position: relative;
-}
-
-.sql-results-export > button {
-  width: auto;
-  padding: 0.35em 0.8em;
-  font-size: 0.9rem;
 }
 
 .export-menu {

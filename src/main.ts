@@ -260,6 +260,16 @@ let appLogEntriesCache: AppLogEntry[] = [];
 let browserSqlModulePromise: Promise<BrowserSqlModule> | null = null;
 let browserWorkspaceDbPromise: Promise<BrowserSqlDatabase> | null = null;
 
+// Keeps aria-disabled in step with the native attribute so assistive tech and
+// accessibility checkers are told the control is unavailable.
+function setDisabled(element: Element | null | undefined, disabled: boolean) {
+  if (!element) {
+    return;
+  }
+  element.toggleAttribute("disabled", disabled);
+  element.setAttribute("aria-disabled", String(disabled));
+}
+
 function hasTauriBackend() {
   return typeof (window as TauriWindow).__TAURI_INTERNALS__?.invoke === "function";
 }
@@ -884,14 +894,14 @@ function applyRuntimeAvailabilityState() {
   // A bridged session still has the desktop app behind it, so only the
   // features that have no bridge route are switched off.
   if (sqlBridge) {
-    testPresetButtonEl?.toggleAttribute("disabled", true);
+    setDisabled(testPresetButtonEl, true);
     setLauncherMessage("Connected to the desktop SQL bridge. Queries run against your real connections.");
     return;
   }
 
-  databaseSelectorEl?.toggleAttribute("disabled", true);
-  toggleFavoriteDatabaseEl?.toggleAttribute("disabled", true);
-  testPresetButtonEl?.toggleAttribute("disabled", true);
+  setDisabled(databaseSelectorEl, true);
+  setDisabled(toggleFavoriteDatabaseEl, true);
+  setDisabled(testPresetButtonEl, true);
   setLauncherMessage("Browser fallback is active. SQL runs against the internal workspace database in this preview.");
 }
 
@@ -1357,7 +1367,7 @@ function nextFrame() {
 
 function syncExportControls() {
   const canExport = Boolean(lastSqlQueryResult?.columns.length);
-  exportResultsButtonEl?.toggleAttribute("disabled", !canExport);
+  setDisabled(exportResultsButtonEl, !canExport);
   if (!canExport) {
     closeExportMenu();
   }
@@ -1398,7 +1408,7 @@ async function exportSqlResults(format: ExportFormat) {
   }
 
   try {
-    exportResultsButtonEl?.toggleAttribute("disabled", true);
+    setDisabled(exportResultsButtonEl, true);
     const filename = exportFileName(lastSqlQueryResult.connectionLabel, format);
     const rowCount = lastSqlQueryResult.rows.length.toLocaleString();
     const rowLabel = `${rowCount} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}`;
@@ -2681,9 +2691,9 @@ async function savePreset(event: SubmitEvent) {
 }
 
 function setLauncherBusy(isBusy: boolean) {
-  openTauriButtonEl?.toggleAttribute("disabled", isBusy);
-  openBrowserButtonEl?.toggleAttribute("disabled", isBusy);
-  launchMenuButtonEl?.toggleAttribute("disabled", isBusy);
+  setDisabled(openTauriButtonEl, isBusy);
+  setDisabled(openBrowserButtonEl, isBusy);
+  setDisabled(launchMenuButtonEl, isBusy);
 }
 
 function setPresetBusy(isBusy: boolean) {
@@ -2693,7 +2703,7 @@ function setPresetBusy(isBusy: boolean) {
       element instanceof HTMLSelectElement ||
       element instanceof HTMLButtonElement
     ) {
-      element.toggleAttribute("disabled", isBusy);
+      setDisabled(element, isBusy);
     }
   });
 }
@@ -2845,7 +2855,7 @@ async function renewMssqlPassword(event: SubmitEvent) {
   }
 
   try {
-    renewPasswordButtonEl?.toggleAttribute("disabled", true);
+    setDisabled(renewPasswordButtonEl, true);
     const result = await invokeBackend<ConnectionTestResult>("renew_mssql_password", {
       connectionId,
       oldPassword,
@@ -2856,7 +2866,7 @@ async function renewMssqlPassword(event: SubmitEvent) {
   } catch (error) {
     setLauncherMessage(error instanceof Error ? error.message : String(error), true);
   } finally {
-    renewPasswordButtonEl?.toggleAttribute("disabled", false);
+    setDisabled(renewPasswordButtonEl, false);
   }
 }
 
@@ -2878,8 +2888,8 @@ async function runSql() {
       ? normalizeSQuerrlStatement(editorStatement)
       : null;
     const execution = prepareSqlExecution(editorStatement);
-    runSqlButtonEl?.toggleAttribute("disabled", true);
-    clearSqlButtonEl?.toggleAttribute("disabled", true);
+    setDisabled(runSqlButtonEl, true);
+    setDisabled(clearSqlButtonEl, true);
 
     if (bufferedSQuerrlStatement) {
       sqlEditorEl.value = execution.statement;
@@ -2927,8 +2937,8 @@ async function runSql() {
   } finally {
     // The overlay is dismissed by renderSqlResults once the rows have finished
     // painting, which outlives this function on large result sets.
-    runSqlButtonEl?.toggleAttribute("disabled", false);
-    clearSqlButtonEl?.toggleAttribute("disabled", false);
+    setDisabled(runSqlButtonEl, false);
+    setDisabled(clearSqlButtonEl, false);
   }
 }
 
@@ -2952,6 +2962,12 @@ async function openWorkspaceSession(mode: "tauri" | "browser") {
     // details it was handed rather than asking the backend for them.
     const info = hasTauriBackend() ? await invoke<SqlBridge>("get_bridge_info") : sqlBridge;
     if (!info) {
+      if (!hasTauriBackend()) {
+        // Standalone web preview: duplicate this page on its local fallback DB.
+        window.open(window.location.href, "_blank", "noopener,noreferrer");
+        setLaunchMessage("Opened another Rusty Pythia workspace window.");
+        return;
+      }
       throw new Error("The SQL bridge is not available in this session.");
     }
 
@@ -2994,6 +3010,22 @@ function initializeApp() {
   launchMenuButtonEl = document.querySelector("#launch-menu-button");
   launchMenuEl = document.querySelector("#launch-menu");
   launchMsgEl = document.querySelector("#launch-msg");
+  // A browser session can only open more browser tabs, so the Tauri/Browser
+  // menu collapses into a single direct-action button.
+  if (!hasTauriBackend() && launchMenuButtonEl) {
+    launchMenuButtonEl.textContent = "Launch Another SQL Window";
+    launchMenuButtonEl.title = "Open another Rusty Pythia workspace in a new browser window";
+    launchMenuButtonEl.removeAttribute("aria-haspopup");
+    launchMenuButtonEl.removeAttribute("aria-expanded");
+    launchMenuButtonEl.removeAttribute("aria-controls");
+    document
+      .querySelector("#launch-tools-title")
+      ?.setAttribute("title", "Open another Rusty Pythia workspace in a new browser window.");
+    launchMenuEl?.remove();
+    launchMenuEl = null;
+    openTauriButtonEl = null;
+    openBrowserButtonEl = null;
+  }
   databaseSelectorEl = document.querySelector("#database-selector");
   toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
   workspaceDbPathEl = document.querySelector("#workspace-db-path");
@@ -3470,10 +3502,18 @@ function initializeApp() {
   });
 
   launchMenuButtonEl?.addEventListener("click", () => {
+    if (!hasTauriBackend()) {
+      void openWorkspaceSession("browser");
+      return;
+    }
     toggleLaunchMenu();
   });
 
   launchMenuButtonEl?.addEventListener("keydown", (event) => {
+    if (!launchMenuEl) {
+      return;
+    }
+
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setLaunchMenuOpen(true, "first");

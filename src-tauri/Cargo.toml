@@ -1,7 +1,7 @@
 [package]
 name = "rusty-pythia"
 version = "2026.9.28+3"
-description = "A Tauri App"
+description = "Rusty Pythia SQL workspace"
 authors = ["you"]
 edition = "2021"
 
