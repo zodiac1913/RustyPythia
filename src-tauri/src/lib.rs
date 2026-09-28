@@ -2172,9 +2172,9 @@ async fn save_export_pdf(app: AppHandle, filename: String, html: String) -> Resu
     // bytes come back over a channel.
     let dispatch = app.run_on_main_thread(move || {
         #[cfg(target_os = "macos")]
-        let outcome = render_html_as_pdf(&html);
+        let outcome: Result<Vec<u8>, String> = render_html_as_pdf(&html);
         #[cfg(not(target_os = "macos"))]
-        let outcome = {
+        let outcome: Result<Vec<u8>, String> = {
             let _ = &html;
             Err("Rendering a PDF from HTML is only supported on macOS.".to_string())
         };
