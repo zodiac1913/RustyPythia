@@ -37,7 +37,10 @@ git push origin 2026.09.28.0
 ```
 
 Installers are stamped with the tag's version (for example, tag `2026.09.28.2` becomes
-`2026.9.28+2`, shown by the Windows installer as `2026.9.28.2`). Builds are produced for
+`2026.9.28+2`, shown by the Windows installer as `2026.9.28.2`). The release workflow
+stamps that version into `package.json`, `src-tauri/Cargo.toml`, and
+`src-tauri/tauri.conf.json` at build time; the committed files carry the latest released
+version. Builds are produced for
 macOS (`.dmg`, Apple Silicon), Windows (`-setup.exe`), and Linux (`.AppImage`, `.deb`,
 `.rpm`). There is no MSI because MSI versions cannot start with a number above 255.
 
