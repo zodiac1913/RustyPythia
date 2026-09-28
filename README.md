@@ -25,6 +25,20 @@ The query mode selector offers three choices:
 All three modes execute the resulting statement as SQL against the selected database.
 Use **Query Search** to find and load previously executed statements into the editor.
 
+### Releases
+
+Pushing a tag in `YYYY.MM.DD.xx` format builds and publishes installers for macOS,
+Windows, and Linux. The attempt counter starts at `0` for the first release attempt
+of the day. For example:
+
+```sh
+git tag 2026.09.28.0
+git push origin 2026.09.28.0
+```
+
+The resulting GitHub release contains unsigned installers; users may see platform
+security prompts when opening them.
+
 ### SQuerL
 
 **SQuerL** means **Storage Quick-access Unearthing Ecosystem Reference Layer**. It is a table-first query language for quickly exploring the active database schema.

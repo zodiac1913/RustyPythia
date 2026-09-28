@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "20??.??.??.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: macos-latest
+          - platform: Windows
+            runner: windows-latest
+          - platform: Linux
+            runner: ubuntu-24.04
+
+    steps:
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Build and publish release assets
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Rusty Pythia ${{ github.ref_name }}
+          releaseBody: |
+            Installers for macOS, Windows, and Linux are attached below.
+            These builds are unsigned.
+          releaseDraft: false
+          prerelease: false
