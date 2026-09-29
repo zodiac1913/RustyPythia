@@ -1,6 +1,13 @@
 import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  bridgeInvoke as bridgeRequest,
+  isBridgedCommand,
+  readSqlBridge,
+  startBridgeHeartbeat,
+  type SqlBridge,
+} from "./backend";
 import initSqlJs from "sql.js";
 import sqlWasmUrl from "sql.js/dist/sql-wasm.wasm?url";
 import {
@@ -44,6 +51,7 @@ type BrowserSqlModule = {
 let launcherMsgEl: HTMLElement | null;
 let openTauriButtonEl: HTMLButtonElement | null;
 let openBrowserButtonEl: HTMLButtonElement | null;
+let openAiButtonEl: HTMLButtonElement | null;
 let launchMenuButtonEl: HTMLButtonElement | null;
 let launchMenuEl: HTMLElement | null;
 let launchMsgEl: HTMLElement | null;
@@ -774,101 +782,13 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
   }
 }
 
-/// Connection details for the desktop app's loopback SQL bridge.
-///
-/// A browser session that was launched from the app carries these in its URL.
-/// With them the page runs SQL through the real drivers in Rust; without them
-/// it degrades to the local SQLite workspace.
-type SqlBridge = { port: number; token: string };
-
-const BRIDGE_STORAGE_KEY = "rustyPythia.bridge";
-
-function readSqlBridge(): SqlBridge | null {
-  const params = new URLSearchParams(window.location.search);
-  const port = Number(params.get("bridge"));
-  const token = params.get("token");
-
-  if (port > 0 && token) {
-    const bridge = { port, token } satisfies SqlBridge;
-    window.sessionStorage.setItem(BRIDGE_STORAGE_KEY, JSON.stringify(bridge));
-    // The token should not linger in the address bar where it can be copied
-    // into a bug report or shared screenshot.
-    params.delete("bridge");
-    params.delete("token");
-    const query = params.toString();
-    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
-    return bridge;
-  }
-
-  try {
-    const stored = window.sessionStorage.getItem(BRIDGE_STORAGE_KEY);
-    return stored ? (JSON.parse(stored) as SqlBridge) : null;
-  } catch {
-    return null;
-  }
-}
-
 let sqlBridge: SqlBridge | null = null;
-
-/// Tells the desktop app this browser session is alive.
-///
-/// The app shuts down once nothing is using it, and a browser tab is not a
-/// window it can see. Without this pulse a tab left open would be ignored and
-/// the backend would exit out from under it.
-function startBridgeHeartbeat(bridge: SqlBridge) {
-  const sessionId = crypto.randomUUID();
-  const endpoint = `http://127.0.0.1:${bridge.port}/api/session`;
-
-  const ping = (closing: boolean) => {
-    const body = JSON.stringify({ sessionId, closing });
-
-    // An unload handler cannot await fetch, so the farewell goes out as a
-    // keepalive request that survives the page going away.
-    void fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${bridge.token}`,
-      },
-      body,
-      keepalive: true,
-    }).catch(() => undefined);
-  };
-
-  ping(false);
-  const timer = window.setInterval(() => ping(false), 5000);
-
-  window.addEventListener("pagehide", () => {
-    window.clearInterval(timer);
-    ping(true);
-  });
-}
 
 async function bridgeInvoke<T>(command: string, args?: Record<string, unknown>) {
   if (!sqlBridge) {
     throw new Error("No SQL bridge available.");
   }
-
-  const route =
-    command === "execute_sql_query"
-      ? "query"
-      : command === "load_sql_schema"
-        ? "schema"
-        : "presets";
-  const response = await fetch(`http://127.0.0.1:${sqlBridge.port}/api/${route}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${sqlBridge.token}`,
-    },
-    body: JSON.stringify(args ?? {}),
-  });
-
-  if (!response.ok) {
-    throw new Error((await response.text()) || `SQL bridge returned ${response.status}.`);
-  }
-
-  return (await response.json()) as T;
+  return bridgeRequest<T>(sqlBridge, command, args);
 }
 
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>) {
@@ -878,8 +798,7 @@ async function invokeBackend<T>(command: string, args?: Record<string, unknown>)
 
   // Only the database commands cross the bridge; everything else stays local
   // to the browser preview.
-  const BRIDGED = ["execute_sql_query", "load_sql_schema", "load_preset_store"];
-  if (sqlBridge && BRIDGED.includes(command)) {
+  if (sqlBridge && isBridgedCommand(command)) {
     return bridgeInvoke<T>(command, args);
   }
 
@@ -2693,6 +2612,7 @@ async function savePreset(event: SubmitEvent) {
 function setLauncherBusy(isBusy: boolean) {
   setDisabled(openTauriButtonEl, isBusy);
   setDisabled(openBrowserButtonEl, isBusy);
+  setDisabled(openAiButtonEl, isBusy);
   setDisabled(launchMenuButtonEl, isBusy);
 }
 
@@ -2991,6 +2911,36 @@ async function openWorkspaceSession(mode: "tauri" | "browser") {
   }
 }
 
+/// Opens the Oracle: a native AI window from the desktop app, or a new tab on
+/// the SQL bridge from a browser session.
+async function openAiSession() {
+  try {
+    setLauncherBusy(true);
+    setLaunchMenuOpen(false);
+
+    if (hasTauriBackend()) {
+      await invoke("open_ai_window");
+      setLaunchMessage("Opened an AI window.");
+      void recordAppEvent("ui.ai.window", "Opened an AI window");
+      return;
+    }
+
+    if (!sqlBridge) {
+      throw new Error("The AI window needs the Rusty Pythia desktop app behind it.");
+    }
+
+    const target = `http://127.0.0.1:${sqlBridge.port}/ai.html?bridge=${sqlBridge.port}&token=${encodeURIComponent(sqlBridge.token)}`;
+    window.open(target, "_blank", "noopener,noreferrer");
+    setLaunchMessage("Opened an AI window in a new tab.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setLaunchMessage(message, true);
+    void recordAppEvent("ui.ai.error", `Failed to open an AI window: ${message}`);
+  } finally {
+    setLauncherBusy(false);
+  }
+}
+
 let hasInitializedApp = false;
 
 function initializeApp() {
@@ -3007,24 +2957,23 @@ function initializeApp() {
   launcherMsgEl = document.querySelector("#launcher-msg");
   openTauriButtonEl = document.querySelector("#open-tauri-button");
   openBrowserButtonEl = document.querySelector("#open-browser-button");
+  openAiButtonEl = document.querySelector("#open-ai-button");
   launchMenuButtonEl = document.querySelector("#launch-menu-button");
   launchMenuEl = document.querySelector("#launch-menu");
   launchMsgEl = document.querySelector("#launch-msg");
-  // A browser session can only open more browser tabs, so the Tauri/Browser
-  // menu collapses into a single direct-action button.
+  // A browser session can only open more browser tabs, so the native-window
+  // choice is dropped and the rest open as new tabs.
   if (!hasTauriBackend() && launchMenuButtonEl) {
-    launchMenuButtonEl.textContent = "Launch Another SQL Window";
-    launchMenuButtonEl.title = "Open another Rusty Pythia workspace in a new browser window";
-    launchMenuButtonEl.removeAttribute("aria-haspopup");
-    launchMenuButtonEl.removeAttribute("aria-expanded");
-    launchMenuButtonEl.removeAttribute("aria-controls");
+    launchMenuButtonEl.textContent = "Launch Another Window";
+    launchMenuButtonEl.title = "Open another Rusty Pythia workspace or AI window in a new browser tab";
     document
       .querySelector("#launch-tools-title")
-      ?.setAttribute("title", "Open another Rusty Pythia workspace in a new browser window.");
-    launchMenuEl?.remove();
-    launchMenuEl = null;
+      ?.setAttribute("title", "Open another Rusty Pythia workspace or AI window in a new browser tab.");
+    openTauriButtonEl?.remove();
     openTauriButtonEl = null;
-    openBrowserButtonEl = null;
+    if (openBrowserButtonEl) {
+      openBrowserButtonEl.textContent = "Open Another SQL Window";
+    }
   }
   databaseSelectorEl = document.querySelector("#database-selector");
   toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
@@ -3502,10 +3451,6 @@ function initializeApp() {
   });
 
   launchMenuButtonEl?.addEventListener("click", () => {
-    if (!hasTauriBackend()) {
-      void openWorkspaceSession("browser");
-      return;
-    }
     toggleLaunchMenu();
   });
 
@@ -3528,6 +3473,10 @@ function initializeApp() {
 
   openBrowserButtonEl?.addEventListener("click", () => {
     void openWorkspaceSession("browser");
+  });
+
+  openAiButtonEl?.addEventListener("click", () => {
+    void openAiSession();
   });
 
   document.addEventListener("click", (event) => {

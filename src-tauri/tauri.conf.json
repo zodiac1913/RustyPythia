@@ -29,6 +29,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "resources/ai/": "ai/"
+    },
     "targets": [
       "app",
       "dmg",

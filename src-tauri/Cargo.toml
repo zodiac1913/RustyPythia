@@ -34,6 +34,9 @@ tiberius = { path = "vendor/tiberius", default-features = false, features = ["ru
 chrono = "0.4"
 futures-util = "0.3"
 base64 = "0.22"
+# Talks to the local Ollama server over plain loopback HTTP, so no TLS stack.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "4", default-features = false, features = ["apple-native-keyring-store"] }

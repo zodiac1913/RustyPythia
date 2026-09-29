@@ -1,4 +1,6 @@
+mod ai;
 mod bridge;
+mod probe;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -2226,6 +2228,37 @@ fn open_workspace_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_ai_window(app: AppHandle) -> Result<(), String> {
+    let mut window_config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .ok_or_else(|| "Missing main window configuration.".to_string())?;
+
+    // The label has to match the capability's window pattern, or the new
+    // window loads but cannot call a single command.
+    window_config.label = format!("ai-{}", next_window_suffix());
+    window_config.title = "Rusty Pythia · Ask The Oracle".into();
+    window_config.url = WebviewUrl::App("ai.html".into());
+    window_config.create = true;
+    window_config.width = 1360.0;
+    window_config.height = 960.0;
+    window_config.min_width = Some(960.0);
+    window_config.min_height = Some(700.0);
+
+    WebviewWindowBuilder::from_config(&app, &window_config)
+        .map_err(|err| format!("Failed to load AI window config: {}", err))?
+        .background_color(rusty_window_color())
+        .build()
+        .map_err(|err| format!("Failed to create AI window: {}", err))?;
+
+    write_app_log(&app, "ai.window", "Opened an AI window");
+    Ok(())
+}
+
+#[tauri::command]
 fn open_sql_window(app: AppHandle, url: String) -> Result<(), String> {
     let result = build_sql_window(&app, &url);
     match &result {
@@ -2330,6 +2363,10 @@ pub fn run() {
             save_export_pdf,
             open_sql_window,
             open_workspace_window,
+            open_ai_window,
+            ai::ai_status,
+            ai::ai_assist,
+            probe::probe_schema,
             execute_sql_query,
             load_sql_schema,
             load_app_log,
@@ -2355,6 +2392,7 @@ pub fn run() {
                 ),
                 Err(err) => write_app_log(&app.handle(), "bridge.error", &err),
             }
+            probe::start_background_sweep(app.handle());
             write_app_log(
                 &app.handle(),
                 "app.startup",

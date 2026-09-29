@@ -1750,3 +1750,117 @@ button:focus-visible {
     background-color: rgba(84, 44, 31, 0.72);
   }
 }
+
+.sql-editor-input-wrap {
+  position: relative;
+}
+
+.sql-autocomplete-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 10;
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(177, 88, 61, 0.22);
+  border-radius: 12px;
+  background: rgba(255, 252, 251, 0.95);
+  box-shadow: 0 14px 32px rgba(74, 34, 25, 0.18);
+}
+
+.sql-autocomplete-list__item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #3d1f18;
+  box-shadow: none;
+}
+
+.sql-autocomplete-list__item:hover,
+.sql-autocomplete-list__item.is-selected {
+  border-color: rgba(177, 88, 61, 0.35);
+  background: rgba(177, 88, 61, 0.12);
+}
+
+.sql-starter-modal__form {
+  gap: 18px;
+}
+
+.sql-starter-modal__summary {
+  margin: 6px 0 0;
+  color: rgba(50, 27, 23, 0.72);
+  font-size: 0.92rem;
+}
+
+.sql-starter-modal__sections {
+  display: grid;
+  gap: 16px;
+}
+
+.sql-starter-modal__section {
+  display: grid;
+  gap: 10px;
+}
+
+.sql-starter-modal__section-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.sql-starter-modal__section-header p {
+  margin: 4px 0 0;
+  color: rgba(50, 27, 23, 0.68);
+  font-size: 0.88rem;
+}
+
+.sql-starter-modal__results {
+  max-height: 220px;
+}
+
+.sql-starter-modal__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(177, 88, 61, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 250, 248, 0.5);
+  color: #201514;
+  box-shadow: none;
+  text-align: left;
+}
+
+.sql-starter-modal__item:hover,
+.sql-starter-modal__item:focus,
+.sql-starter-modal__item.is-selected {
+  background: rgba(255, 250, 248, 0.85);
+  border-color: rgba(177, 88, 61, 0.28);
+}
+
+.sql-starter-modal__item-label {
+  font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92rem;
+}
+
+.sql-starter-modal__item-kind {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(177, 88, 61, 0.14);
+  color: #7a402d;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}

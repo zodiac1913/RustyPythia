@@ -201,6 +201,53 @@ async fn presets_endpoint(State(state): State<Arc<BridgeState>>, headers: Header
     }
 }
 
+async fn ai_status_endpoint(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Response {
+    let cors = cors_headers(headers.get(header::ORIGIN));
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
+    }
+
+    (StatusCode::OK, cors, Json(crate::ai::ollama_status().await)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct AiAssistEnvelope {
+    request: crate::ai::AiAssistRequest,
+}
+
+async fn ai_assist_endpoint(
+    State(state): State<Arc<BridgeState>>,
+    headers: HeaderMap,
+    Json(envelope): Json<AiAssistEnvelope>,
+) -> Response {
+    let cors = cors_headers(headers.get(header::ORIGIN));
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
+    }
+
+    match crate::ai::run_ai_assist(state.app.clone(), envelope.request).await {
+        Ok(decision) => (StatusCode::OK, cors, Json(decision)).into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, cors, message).into_response(),
+    }
+}
+
+async fn ai_probe_endpoint(
+    State(state): State<Arc<BridgeState>>,
+    headers: HeaderMap,
+    Json(request): Json<SchemaRequest>,
+) -> Response {
+    let cors = cors_headers(headers.get(header::ORIGIN));
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
+    }
+
+    let connection_id = crate::normalize_connection_id(request.connection_id.as_deref()).to_string();
+    match crate::probe::probe_connection(&state.app, &connection_id).await {
+        Ok(summary) => (StatusCode::OK, cors, Json(summary)).into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, cors, message).into_response(),
+    }
+}
+
 async fn session_endpoint(
     State(state): State<Arc<BridgeState>>,
     headers: HeaderMap,
@@ -226,16 +273,8 @@ async fn session_endpoint(
 fn serve_asset(state: &BridgeState, path: &str) -> Response {
     let lookup = if path.is_empty() { "index.html" } else { path };
 
-    if let Some(asset) = state.app.asset_resolver().get(format!("/{}", lookup)) {
-        let mut headers = HeaderMap::new();
-        if let Ok(value) = HeaderValue::from_str(&asset.mime_type) {
-            headers.insert(header::CONTENT_TYPE, value);
-        }
-        return (StatusCode::OK, headers, asset.bytes).into_response();
-    }
-
-    // A dev build has no embedded assets, so hand the session to Vite while
-    // keeping the bridge details in the URL.
+    // Dev builds can embed a stale dist/, so live edits must come from Vite.
+    // The bridge details stay in the URL.
     if let Some(dev_url) = &state.dev_url {
         let separator = if lookup == "index.html" { "" } else { lookup };
         return Redirect::temporary(&format!(
@@ -246,6 +285,14 @@ fn serve_asset(state: &BridgeState, path: &str) -> Response {
             state.token
         ))
         .into_response();
+    }
+
+    if let Some(asset) = state.app.asset_resolver().get(format!("/{}", lookup)) {
+        let mut headers = HeaderMap::new();
+        if let Ok(value) = HeaderValue::from_str(&asset.mime_type) {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
+        return (StatusCode::OK, headers, asset.bytes).into_response();
     }
 
     (StatusCode::NOT_FOUND, "Not found").into_response()
@@ -274,6 +321,7 @@ pub fn start(app: &AppHandle) -> Result<BridgeInfo, String> {
         .build
         .dev_url
         .as_ref()
+        .filter(|_| tauri::is_dev())
         .map(|url| url.to_string());
 
     let state = Arc::new(BridgeState {
@@ -300,6 +348,18 @@ pub fn start(app: &AppHandle) -> Result<BridgeInfo, String> {
             "/api/presets",
             post(presets_endpoint).options(preflight),
         )
+        .route(
+            "/api/ai/status",
+            post(ai_status_endpoint).options(preflight),
+        )
+        .route(
+            "/api/ai/assist",
+            post(ai_assist_endpoint).options(preflight),
+        )
+        .route(
+            "/api/ai/probe",
+            post(ai_probe_endpoint).options(preflight),
+        )
         .route("/{*path}", get(asset_route))
         .with_state(state);
 
@@ -317,7 +377,6 @@ pub fn start(app: &AppHandle) -> Result<BridgeInfo, String> {
 
     let info = BridgeInfo { port, token };
     let _ = BRIDGE.set(info.clone());
-
     tauri::async_runtime::spawn(async move {
         match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => {
