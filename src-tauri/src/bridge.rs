@@ -210,6 +210,15 @@ async fn ai_status_endpoint(State(state): State<Arc<BridgeState>>, headers: Head
     (StatusCode::OK, cors, Json(crate::ai::ollama_status().await)).into_response()
 }
 
+async fn ai_slap_endpoint(State(state): State<Arc<BridgeState>>, headers: HeaderMap) -> Response {
+    let cors = cors_headers(headers.get(header::ORIGIN));
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
+    }
+
+    (StatusCode::OK, cors, Json(crate::ai::slap_ollama().await)).into_response()
+}
+
 #[derive(Debug, Deserialize)]
 struct AiAssistEnvelope {
     request: crate::ai::AiAssistRequest,
@@ -227,6 +236,22 @@ async fn ai_assist_endpoint(
 
     match crate::ai::run_ai_assist(state.app.clone(), envelope.request).await {
         Ok(decision) => (StatusCode::OK, cors, Json(decision)).into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, cors, message).into_response(),
+    }
+}
+
+async fn ai_execute_endpoint(
+    State(state): State<Arc<BridgeState>>,
+    headers: HeaderMap,
+    Json(request): Json<QueryRequest>,
+) -> Response {
+    let cors = cors_headers(headers.get(header::ORIGIN));
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
+    }
+
+    match crate::ai::ai_execute_sql(state.app.clone(), request.connection_id, request.sql).await {
+        Ok(result) => (StatusCode::OK, cors, Json(result)).into_response(),
         Err(message) => (StatusCode::BAD_REQUEST, cors, message).into_response(),
     }
 }
@@ -353,8 +378,16 @@ pub fn start(app: &AppHandle) -> Result<BridgeInfo, String> {
             post(ai_status_endpoint).options(preflight),
         )
         .route(
+            "/api/ai/slap",
+            post(ai_slap_endpoint).options(preflight),
+        )
+        .route(
             "/api/ai/assist",
             post(ai_assist_endpoint).options(preflight),
+        )
+        .route(
+            "/api/ai/query",
+            post(ai_execute_endpoint).options(preflight),
         )
         .route(
             "/api/ai/probe",

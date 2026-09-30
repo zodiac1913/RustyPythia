@@ -15,7 +15,9 @@ Primary personnel action table for employee events such as appointments, reassig
 
 - Primary candidate table for employee action questions such as appointments, reassignments, separations, or other personnel events.
 - Use this table when HR.HR_Employee is not sufficient because the user is asking about the action itself rather than the employee's current state.
-- High-value fields are usually Noa, NoaDescription, PersonnelActionSubmissionDate, PersonnelActionEffectiveDate, and the component and pay-period fields attached to the action.
+- Action types are the NOA key values for actions. Join Noa to CORE.KeyValue.KeyValueCode for the CORE.KeyValueDefinition whose KeyValueDefinitionName is the NOA list. Use KeyValueDescription as the action type text.
+- Never invent a PersonnelActionCategory column. For phrases such as "pay adjustments," match the NOA KeyValueDescription after resolving the NOA list.
+- PersonnelActionEffectiveDate is when the action took effect; PersonnelActionSubmissionDate is when it was submitted. Use an inclusive start and exclusive next-year boundary on the effective date for calendar-year action counts unless submissions are explicitly requested.
 - This table can often answer both what happened and when it happened, while HR.HR_Employee mainly answers what is true now.
 
 ## Columns

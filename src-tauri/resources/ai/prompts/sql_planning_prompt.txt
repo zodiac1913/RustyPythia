@@ -13,6 +13,7 @@ The database holds {{TOTAL_TABLES}} tables.
 The excerpt below has already been sifted, ranked, and revealed as the most relevant to the user’s latest request.
 You must rely only on this revealed schema.
 You must never invent tables, columns, or relationships that are not shown.
+Every identifier in generated SQL MUST appear in the revealed schema excerpt. If a needed field is absent, return status "clarify" and explain which business meaning is missing; never guess a plausible field name. RustyPythia has already inspected the database metadata, so do not fabricate a substitute or claim that a supplied table is merely assumed.
 
 ========================
 ABSOLUTE RULES — HIGHEST PRIORITY

@@ -45,6 +45,9 @@ Portable retrieval patterns for AI systems that need to translate non-technical 
 - Steps:
   - Resolve the employee in HR.HR_Employee if the user only supplied person information.
   - Use HR.HR_PersonnelAction as the main table for action-centric questions.
+  - Action types are the NOA key values for actions. Join HR.HR_PersonnelAction.Noa to CORE.KeyValue.KeyValueCode, and join that row to CORE.KeyValueDefinition on KeyValueDefinitionIdentifier. Keep the definition whose KeyValueDefinitionName is the NOA list. Use KeyValueDescription as the action type text.
+  - Never invent PersonnelActionCategory. Match requested action wording, such as pay adjustments, against the NOA KeyValueDescription.
+  - Use PersonnelActionEffectiveDate for when an action took effect and PersonnelActionSubmissionDate only when the user asks when it was submitted.
   - Use HR.HR_Employee only as supporting context for the current or broad employee snapshot.
 
 ## Find user roles

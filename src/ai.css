@@ -286,5 +286,11 @@
   .ai-prompt {
     background: rgba(31, 22, 21, 0.8);
     border-color: rgba(229, 160, 136, 0.4);
+    color: greenyellow;
+    caret-color: greenyellow;
+  }
+
+  .ai-prompt::placeholder {
+    color: rgba(173, 255, 47, 0.62);
   }
 }

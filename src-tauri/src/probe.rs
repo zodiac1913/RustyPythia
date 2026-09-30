@@ -34,6 +34,8 @@ pub struct ProbeTable {
     pub kind: String,
     pub row_count: Option<i64>,
     pub primary_key: Vec<String>,
+    /// Primary-key columns the engine fills itself. Those values are never null.
+    pub identity_key: Vec<String>,
     pub columns: Vec<ProbeColumn>,
 }
 
@@ -78,6 +80,7 @@ struct CatalogSnapshot {
     objects: Vec<CatalogObject>,
     columns: HashMap<String, Vec<ProbeColumn>>,
     primary_keys: HashMap<String, Vec<String>>,
+    identity_keys: HashMap<String, Vec<String>>,
     row_counts: HashMap<String, i64>,
     foreign_keys: Vec<(String, String, String, String)>,
 }
@@ -105,6 +108,7 @@ fn ensure_probe_tables(connection: &SqliteConnection) -> Result<(), String> {
                 modified_marker TEXT NOT NULL,
                 row_count INTEGER,
                 primary_key TEXT NOT NULL DEFAULT '[]',
+                identity_key TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (connection_id, table_name)
             );
             CREATE TABLE IF NOT EXISTS schema_probe_column (
@@ -135,7 +139,13 @@ fn ensure_probe_tables(connection: &SqliteConnection) -> Result<(), String> {
             );
             ",
         )
-        .map_err(|err| format!("Failed to prepare schema probe tables: {}", err))
+        .map_err(|err| format!("Failed to prepare schema probe tables: {}", err))?;
+    // Catalogs probed before identity detection are missing this column.
+    let _ = connection.execute(
+        "ALTER TABLE schema_probe_table ADD COLUMN identity_key TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    Ok(())
 }
 
 fn is_null_cell(value: &str) -> bool {
@@ -251,6 +261,18 @@ async fn read_mssql_catalog(
         }
     }
 
+    let mut identity_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for row in mssql_rows(
+        preset,
+        "SELECT CAST(object_id AS varchar(20)), name FROM sys.identity_columns",
+    )
+    .await?
+    {
+        if row.len() >= 2 {
+            identity_keys.entry(row[0].clone()).or_default().push(row[1].clone());
+        }
+    }
+
     let foreign_keys = mssql_rows(
         preset,
         "
@@ -285,6 +307,7 @@ async fn read_mssql_catalog(
         objects,
         columns,
         primary_keys,
+        identity_keys,
         row_counts,
         foreign_keys,
     })
@@ -370,10 +393,25 @@ fn read_postgres_catalog(preset: &crate::ConnectionPreset) -> Result<CatalogSnap
         .filter_map(|row| Some((row.first()?.clone(), row.get(1)?.parse::<i64>().ok().filter(|count| *count >= 0)?)))
         .collect();
 
+    let mut identity_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows(
+        "SELECT a.attrelid::text, a.attname
+         FROM pg_attribute a
+         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attnum > 0 AND NOT a.attisdropped
+           AND (a.attidentity IN ('a', 'd')
+                OR pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%')",
+    )? {
+        if row.len() >= 2 {
+            identity_keys.entry(row[0].clone()).or_default().push(row[1].clone());
+        }
+    }
+
     Ok(CatalogSnapshot {
         objects,
         columns,
         primary_keys,
+        identity_keys,
         row_counts,
         foreign_keys,
     })
@@ -413,6 +451,7 @@ fn read_sqlite_catalog(
     let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
     let mut columns = HashMap::new();
     let mut primary_keys = HashMap::new();
+    let mut identity_keys: HashMap<String, Vec<String>> = HashMap::new();
     let mut foreign_keys = Vec::new();
     let mut row_counts = HashMap::new();
 
@@ -444,7 +483,16 @@ fn read_sqlite_catalog(
             })
             .collect::<Vec<_>>();
         key_columns.sort();
-        primary_keys.insert(object.key.clone(), key_columns.into_iter().map(|(_, name)| name).collect());
+        let key_names = key_columns.into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+        // A single INTEGER primary key is SQLite's rowid, so the engine fills it.
+        let auto = key_names.len() == 1
+            && table_columns.iter().any(|column| {
+                column.name == key_names[0] && column.data_type.eq_ignore_ascii_case("integer")
+            });
+        if auto {
+            identity_keys.insert(object.key.clone(), key_names.clone());
+        }
+        primary_keys.insert(object.key.clone(), key_names);
         if stored_markers.get(&object.name) != Some(&object.marker) {
             columns.insert(object.key.clone(), table_columns);
         }
@@ -491,6 +539,7 @@ fn read_sqlite_catalog(
         objects,
         columns,
         primary_keys,
+        identity_keys,
         row_counts,
         foreign_keys,
     })
@@ -658,23 +707,36 @@ fn write_snapshot(
         }
 
         let primary_key = snapshot.primary_keys.get(&object.key).cloned().unwrap_or_default();
+        let identity_key = snapshot
+            .identity_keys
+            .get(&object.key)
+            .map(|columns| {
+                columns
+                    .iter()
+                    .filter(|column| primary_key.iter().any(|key| key.eq_ignore_ascii_case(column)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         transaction
             .execute(
                 "INSERT INTO schema_probe_table
-                 (connection_id, table_name, kind, modified_marker, row_count, primary_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (connection_id, table_name, kind, modified_marker, row_count, primary_key, identity_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT (connection_id, table_name) DO UPDATE SET
                     kind = excluded.kind,
                     modified_marker = excluded.modified_marker,
                     row_count = excluded.row_count,
-                    primary_key = excluded.primary_key",
+                    primary_key = excluded.primary_key,
+                    identity_key = excluded.identity_key",
                 params![
                     connection_id,
                     object.name,
                     object.kind,
                     object.marker,
                     snapshot.row_counts.get(&object.key),
-                    serde_json::to_string(&primary_key).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&primary_key).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&identity_key).unwrap_or_else(|_| "[]".into())
                 ],
             )
             .map_err(fail)?;
@@ -759,7 +821,7 @@ fn read_stored_tables(connection: &SqliteConnection, connection_id: &str) -> Res
 
     let mut statement = connection
         .prepare(
-            "SELECT table_name, kind, row_count, primary_key FROM schema_probe_table
+            "SELECT table_name, kind, row_count, primary_key, identity_key FROM schema_probe_table
              WHERE connection_id = ?1 ORDER BY table_name",
         )
         .map_err(fail)?;
@@ -770,12 +832,14 @@ fn read_stored_tables(connection: &SqliteConnection, connection_id: &str) -> Res
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<i64>>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(fail)?
         .filter_map(Result::ok)
-        .map(|(name, kind, row_count, primary_key)| ProbeTable {
+        .map(|(name, kind, row_count, primary_key, identity_key)| ProbeTable {
             columns: columns.remove(&name).unwrap_or_default(),
+            identity_key: serde_json::from_str(&identity_key).unwrap_or_default(),
             name,
             kind,
             row_count,

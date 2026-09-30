@@ -17,6 +17,7 @@ import {
   exportFileName,
   type ExportFormat,
 } from "./exportResults.ts";
+import { blockUnavailableControls, isUnavailable, setUnavailable, showUnavailable, watchControlLabels } from "./unavailable";
 
 type TauriWindow = Window & {
   __TAURI_INTERNALS__?: {
@@ -268,15 +269,6 @@ let appLogEntriesCache: AppLogEntry[] = [];
 let browserSqlModulePromise: Promise<BrowserSqlModule> | null = null;
 let browserWorkspaceDbPromise: Promise<BrowserSqlDatabase> | null = null;
 
-// Keeps aria-disabled in step with the native attribute so assistive tech and
-// accessibility checkers are told the control is unavailable.
-function setDisabled(element: Element | null | undefined, disabled: boolean) {
-  if (!element) {
-    return;
-  }
-  element.toggleAttribute("disabled", disabled);
-  element.setAttribute("aria-disabled", String(disabled));
-}
 
 function hasTauriBackend() {
   return typeof (window as TauriWindow).__TAURI_INTERNALS__?.invoke === "function";
@@ -813,14 +805,14 @@ function applyRuntimeAvailabilityState() {
   // A bridged session still has the desktop app behind it, so only the
   // features that have no bridge route are switched off.
   if (sqlBridge) {
-    setDisabled(testPresetButtonEl, true);
+    setUnavailable(testPresetButtonEl, true);
     setLauncherMessage("Connected to the desktop SQL bridge. Queries run against your real connections.");
     return;
   }
 
-  setDisabled(databaseSelectorEl, true);
-  setDisabled(toggleFavoriteDatabaseEl, true);
-  setDisabled(testPresetButtonEl, true);
+  setUnavailable(databaseSelectorEl, true);
+  setUnavailable(toggleFavoriteDatabaseEl, true);
+  setUnavailable(testPresetButtonEl, true);
   setLauncherMessage("Browser fallback is active. SQL runs against the internal workspace database in this preview.");
 }
 
@@ -891,7 +883,7 @@ function parseSQuerrlConditions(segment: string) {
   let remaining = segment.trim();
 
   while (remaining) {
-    const match = /^(has|not)\s+([A-Za-z_][A-Za-z0-9_$]*)\s+(contains|!=|>=|<=|=|>|<)\s+([\s\S]+?)(?=(?:\s+(?:has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s+(?:contains|!=|>=|<=|=|>|<)\s+)|$)/i.exec(remaining);
+    const match = /^(has|not)\s+([A-Za-z_][A-Za-z0-9_$]*)\s*(contains|!=|>=|<=|=|>|<)\s*([\s\S]+?)(?=(?:\s+(?:has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s*(?:contains|!=|>=|<=|=|>|<)\s*)|$)/i.exec(remaining);
     if (!match) {
       throw new Error(`Unsupported SQuerL condition segment: ${remaining}`);
     }
@@ -960,7 +952,7 @@ function translateSQuerrlToSql(statement: string) {
 
   const remainder = trimmedStatement.slice(tableName.length).trim();
   const sortMatch = /(^|\s)(~up|~down)(?=\s|$)/i.exec(remainder);
-  const conditionMatch = /(^|\s)(has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s+(contains|!=|>=|<=|=|>|<)\s+/i.exec(remainder);
+  const conditionMatch = /(^|\s)(has|not)\s+[A-Za-z_][A-Za-z0-9_$]*\s*(contains|!=|>=|<=|=|>|<)\s*/i.exec(remainder);
   const sortIndex = sortMatch ? sortMatch.index + sortMatch[1].length : -1;
   const conditionIndex = conditionMatch ? conditionMatch.index + conditionMatch[1].length : -1;
   const fieldSegmentEnd = [sortIndex, conditionIndex]
@@ -1286,7 +1278,7 @@ function nextFrame() {
 
 function syncExportControls() {
   const canExport = Boolean(lastSqlQueryResult?.columns.length);
-  setDisabled(exportResultsButtonEl, !canExport);
+  setUnavailable(exportResultsButtonEl, !canExport);
   if (!canExport) {
     closeExportMenu();
   }
@@ -1327,7 +1319,7 @@ async function exportSqlResults(format: ExportFormat) {
   }
 
   try {
-    setDisabled(exportResultsButtonEl, true);
+    setUnavailable(exportResultsButtonEl, true);
     const filename = exportFileName(lastSqlQueryResult.connectionLabel, format);
     const rowCount = lastSqlQueryResult.rows.length.toLocaleString();
     const rowLabel = `${rowCount} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}`;
@@ -1746,25 +1738,28 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
   const modeChoices = ["has ", "not "];
   const fieldChoices = table.fields;
   const operatorChoices = ["=", "!=", ">", "<", ">=", "<=", "contains"];
+  const fieldOptions = fieldChoices
+    .map((field) => `<option value="${escapeHtml(field)}" title="${escapeHtml(field)}">${escapeHtml(field)}</option>`)
+    .join("");
   squerrlPickerEl.setAttribute("aria-label", `SQuerL condition builder for ${table.name}`);
-  squerrlPickerEl.innerHTML = `<div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerL</span><h3>Build criteria</h3></div><span id="squerrl-condition-status" class="squerrl-picker__status">Step 1 of 6 · choose has or not</span></div><div class="squerrl-condition-builder" aria-label="SQuerL condition builder"><button type="button" id="squerrl-condition-mode" class="squerrl-condition-choice" data-value="has " aria-label="Condition mode">has</button><button type="button" id="squerrl-condition-field" class="squerrl-condition-choice" data-value="${escapeHtml(fieldChoices[0] ?? "")}" aria-label="Condition field">${escapeHtml(fieldChoices[0] ?? "")}</button><button type="button" id="squerrl-condition-operator" class="squerrl-condition-choice" data-value="=" aria-label="Condition operator">=</button><input id="squerrl-condition-value" type="text" placeholder="Value or variable" aria-label="Condition value or variable" /><button type="button" id="squerrl-add-condition">Add condition</button><button type="button" id="squerrl-finish-conditions">Finish</button></div>`;
+  squerrlPickerEl.innerHTML = `<div class="squerrl-picker__header"><div><span class="squerrl-picker__eyebrow">SQuerL</span><h3>Build criteria</h3></div><span id="squerrl-condition-status" class="squerrl-picker__status">Step 1 of 6 · choose has or not</span></div><div class="squerrl-condition-builder" aria-label="SQuerL condition builder"><button type="button" id="squerrl-condition-mode" class="squerrl-condition-choice" data-value="has " aria-label="Condition mode">has</button><select id="squerrl-condition-field" aria-label="Condition field">${fieldOptions}</select><button type="button" id="squerrl-condition-operator" class="squerrl-condition-choice" data-value="=" aria-label="Condition operator">=</button><input id="squerrl-condition-value" type="text" placeholder="Value or variable" aria-label="Condition value or variable" /><button type="button" id="squerrl-add-condition">Add condition</button><button type="button" id="squerrl-finish-conditions">Finish</button></div>`;
   squerrlPickerEl.onkeydown = null;
   squerrlPickerOptionsEl = null;
   squerrlTableSearchEl = null;
   squerrlPickerEl.hidden = false;
 
   const modeEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-mode");
-  const fieldEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-field");
+  const fieldEl = squerrlPickerEl.querySelector<HTMLSelectElement>("#squerrl-condition-field");
   const operatorEl = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-condition-operator");
   const valueEl = squerrlPickerEl.querySelector<HTMLInputElement>("#squerrl-condition-value");
   const addButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-add-condition");
   const finishButton = squerrlPickerEl.querySelector<HTMLButtonElement>("#squerrl-finish-conditions");
   const statusEl = squerrlPickerEl.querySelector<HTMLElement>("#squerrl-condition-status");
   const controls = [modeEl, fieldEl, operatorEl, valueEl, addButton, finishButton].filter(
-    (control): control is HTMLInputElement | HTMLButtonElement => Boolean(control)
+    (control): control is HTMLInputElement | HTMLButtonElement | HTMLSelectElement => Boolean(control)
   );
   const stepLabels = ["choose has or not", "choose a field", "choose an operator", "enter a value or variable", "add the condition", "finish conditions"];
-  const updateStepStatus = (control: HTMLInputElement | HTMLButtonElement) => {
+  const updateStepStatus = (control: HTMLInputElement | HTMLButtonElement | HTMLSelectElement) => {
     const stepIndex = controls.indexOf(control);
     if (statusEl && stepIndex >= 0) {
       statusEl.textContent = `Step ${stepIndex + 1} of ${controls.length} · ${stepLabels[stepIndex]}`;
@@ -1781,8 +1776,11 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
     if (!movesForward && !movesBackward && !movesByTab) {
       return;
     }
-    const activeIndex = controls.indexOf(document.activeElement as HTMLInputElement | HTMLButtonElement);
+    const activeIndex = controls.indexOf(document.activeElement as HTMLInputElement | HTMLButtonElement | HTMLSelectElement);
     if (activeIndex < 0) {
+      return;
+    }
+    if ((document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLSelectElement) && !movesByTab) {
       return;
     }
     const nextIndex = movesBackward || (movesByTab && event.shiftKey)
@@ -1803,7 +1801,6 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
     button.textContent = value.trim();
   };
   modeEl?.addEventListener("click", () => cycleChoice(modeEl, modeChoices));
-  fieldEl?.addEventListener("click", () => cycleChoice(fieldEl, fieldChoices));
   operatorEl?.addEventListener("click", () => cycleChoice(operatorEl, operatorChoices));
 
   controls.forEach((control, controlIndex) => {
@@ -1822,6 +1819,9 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
       if (!movesForward && !movesBackward && !movesByTab) {
         return;
       }
+      if ((control instanceof HTMLInputElement || control instanceof HTMLSelectElement) && !movesByTab) {
+        return;
+      }
       const nextIndex = movesBackward || (movesByTab && event.shiftKey)
         ? (controlIndex - 1 + controls.length) % controls.length
         : (controlIndex + 1) % controls.length;
@@ -1836,7 +1836,7 @@ function renderSQuerrlConditionBuilder(table: SqlSchemaTable) {
       return;
     }
     const cursor = sqlEditorEl.selectionStart;
-    sqlEditorEl.setRangeText(`${modeEl.dataset.value}${fieldEl.dataset.value} ${operatorEl.dataset.value} ${valueEl.value.trim()} `, cursor, cursor, "end");
+    sqlEditorEl.setRangeText(`${modeEl.dataset.value}${fieldEl.value} ${operatorEl.dataset.value} ${valueEl.value.trim()} `, cursor, cursor, "end");
     valueEl.value = "";
     valueEl.focus();
   });
@@ -2610,10 +2610,10 @@ async function savePreset(event: SubmitEvent) {
 }
 
 function setLauncherBusy(isBusy: boolean) {
-  setDisabled(openTauriButtonEl, isBusy);
-  setDisabled(openBrowserButtonEl, isBusy);
-  setDisabled(openAiButtonEl, isBusy);
-  setDisabled(launchMenuButtonEl, isBusy);
+  setUnavailable(openTauriButtonEl, isBusy);
+  setUnavailable(openBrowserButtonEl, isBusy);
+  setUnavailable(openAiButtonEl, isBusy);
+  setUnavailable(launchMenuButtonEl, isBusy);
 }
 
 function setPresetBusy(isBusy: boolean) {
@@ -2623,7 +2623,7 @@ function setPresetBusy(isBusy: boolean) {
       element instanceof HTMLSelectElement ||
       element instanceof HTMLButtonElement
     ) {
-      setDisabled(element, isBusy);
+      setUnavailable(element, isBusy);
     }
   });
 }
@@ -2775,7 +2775,7 @@ async function renewMssqlPassword(event: SubmitEvent) {
   }
 
   try {
-    setDisabled(renewPasswordButtonEl, true);
+    setUnavailable(renewPasswordButtonEl, true);
     const result = await invokeBackend<ConnectionTestResult>("renew_mssql_password", {
       connectionId,
       oldPassword,
@@ -2786,11 +2786,15 @@ async function renewMssqlPassword(event: SubmitEvent) {
   } catch (error) {
     setLauncherMessage(error instanceof Error ? error.message : String(error), true);
   } finally {
-    setDisabled(renewPasswordButtonEl, false);
+    setUnavailable(renewPasswordButtonEl, false);
   }
 }
 
 async function runSql() {
+  if (isUnavailable(runSqlButtonEl)) {
+    showUnavailable(runSqlButtonEl);
+    return;
+  }
   if (!sqlEditorEl) {
     return;
   }
@@ -2808,12 +2812,11 @@ async function runSql() {
       ? normalizeSQuerrlStatement(editorStatement)
       : null;
     const execution = prepareSqlExecution(editorStatement);
-    setDisabled(runSqlButtonEl, true);
-    setDisabled(clearSqlButtonEl, true);
+    setUnavailable(runSqlButtonEl, true);
+    setUnavailable(clearSqlButtonEl, true);
 
     if (bufferedSQuerrlStatement) {
       sqlEditorEl.value = execution.statement;
-      setEditorLanguage("sql");
     }
 
     const connectionLabel = getActiveConnectionLabel();
@@ -2857,8 +2860,8 @@ async function runSql() {
   } finally {
     // The overlay is dismissed by renderSqlResults once the rows have finished
     // painting, which outlives this function on large result sets.
-    setDisabled(runSqlButtonEl, false);
-    setDisabled(clearSqlButtonEl, false);
+    setUnavailable(runSqlButtonEl, false);
+    setUnavailable(clearSqlButtonEl, false);
   }
 }
 
@@ -2947,6 +2950,8 @@ function initializeApp() {
   if (hasInitializedApp) {
     return;
   }
+  watchControlLabels();
+  blockUnavailableControls();
 
   hasInitializedApp = true;
   sqlBridge = readSqlBridge();
@@ -3196,12 +3201,18 @@ function initializeApp() {
     }
 
     // Sort is optional and only offered once a table and fields are present.
+    // Once a sort is in the statement, the same key opens the has builder.
     if (
       event.key === "ArrowDown" &&
       getEffectiveQueryLanguage() === "squerrl" &&
       deriveSQuerrlStage(sqlEditorEl?.value ?? "").stage === "options"
     ) {
       event.preventDefault();
+      if (/(^|\s)~(up|down)(?=\s|$)/i.test(sqlEditorEl?.value ?? "")) {
+        activeSQuerrlStage = "conditions";
+        void maybeShowSQuerrlPicker(true);
+        return;
+      }
       openSQuerrlSortOverlay();
       return;
     }
@@ -3548,9 +3559,6 @@ function initializeApp() {
     if (event.key === "F5") {
       // F5 is the browser reload shortcut, so the default has to be suppressed.
       event.preventDefault();
-      if (runSqlButtonEl?.hasAttribute("disabled")) {
-        return;
-      }
       void runSql();
       return;
     }
@@ -3562,9 +3570,6 @@ function initializeApp() {
     }
     if (event.key === "F8") {
       event.preventDefault();
-      if (clearSqlButtonEl?.hasAttribute("disabled")) {
-        return;
-      }
       clearSqlButtonEl?.click();
     }
   });

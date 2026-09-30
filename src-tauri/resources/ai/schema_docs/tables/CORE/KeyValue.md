@@ -1,6 +1,6 @@
 # CORE.KeyValue
 
-Business-critical table in the CORE schema related to key value.
+Id-to-text rows. KeyValueCode is the id and KeyValueDescription is the text. KeyValueDefinitionIdentifier points at CORE.KeyValueDefinition. Personnel action types are the NOA key values for actions: join HR.HR_PersonnelAction.Noa to KeyValueCode.
 
 ## Snapshot
 

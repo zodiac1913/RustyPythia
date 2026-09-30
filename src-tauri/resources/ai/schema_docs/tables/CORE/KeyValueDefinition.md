@@ -1,6 +1,6 @@
 # CORE.KeyValueDefinition
 
-Business-critical table in the CORE schema related to key value definition.
+Names each id-to-text list. KeyValueDefinitionName identifies the list, including the NOA list for personnel action types. CORE.KeyValue rows belong to a definition through KeyValueDefinitionIdentifier.
 
 ## Snapshot
 

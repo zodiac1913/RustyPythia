@@ -713,7 +713,7 @@ body::after {
 
 .squerrl-condition-builder {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: auto minmax(16rem, 2.6fr) auto minmax(8rem, 1fr) auto auto;
   gap: 8px;
 }
 
@@ -733,7 +733,20 @@ body::after {
   font-weight: 600;
 }
 
+.is-unavailable.border-danger {
+  --bs-border-opacity: 1;
+}
+
+.is-not-available-text {
+  color: #c40000 !important;
+}
+
+.squerrl-condition-builder select {
+  width: 100%;
+}
+
 .squerrl-condition-builder button:focus-visible,
+.squerrl-condition-builder select:focus-visible,
 .squerrl-condition-builder input:focus-visible {
   outline: 3px solid var(--accent-rust-deep);
   outline-offset: 3px;

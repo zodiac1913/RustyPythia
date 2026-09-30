@@ -1,6 +1,7 @@
 import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { bridgeInvoke, hasTauriBackend, readSqlBridge, startBridgeHeartbeat, type SqlBridge } from "./backend";
+import { blockUnavailableControls, isUnavailable, setUnavailable, showUnavailable, watchControlLabels } from "./unavailable";
 
 type OllamaStatus = {
   online: boolean;
@@ -59,6 +60,7 @@ const el = {
   connection: document.querySelector<HTMLSelectElement>("#ai-connection")!,
   model: document.querySelector<HTMLSelectElement>("#ai-model")!,
   refresh: document.querySelector<HTMLButtonElement>("#ai-refresh-status")!,
+  slap: document.querySelector<HTMLButtonElement>("#ai-slap-ollama")!,
   reprobe: document.querySelector<HTMLButtonElement>("#ai-reprobe")!,
   status: document.querySelector<HTMLOutputElement>("#ai-status")!,
   conversation: document.querySelector<HTMLDivElement>("#ai-conversation")!,
@@ -106,15 +108,15 @@ function setStatus(message: string, state: "checking" | "online" | "offline" | "
 
 function syncControls() {
   const canAsk = ollamaOnline && !isWorking;
-  el.prompt.disabled = !canAsk;
-  el.send.disabled = !canAsk;
-  el.clear.disabled = isWorking;
-  el.connection.disabled = isWorking;
-  el.model.disabled = isWorking || !ollamaOnline || el.model.options.length === 0;
-  el.refresh.disabled = isWorking;
-  el.reprobe.disabled = isWorking;
-  el.copySql.disabled = !lastSql;
-  el.rerunSql.disabled = !lastSql || isWorking;
+  setUnavailable(el.send, !canAsk);
+  setUnavailable(el.clear, isWorking);
+  setUnavailable(el.connection, isWorking);
+  setUnavailable(el.model, isWorking || !ollamaOnline || el.model.options.length === 0);
+  setUnavailable(el.refresh, isWorking);
+  setUnavailable(el.slap, isWorking);
+  setUnavailable(el.reprobe, isWorking);
+  setUnavailable(el.copySql, !lastSql);
+  setUnavailable(el.rerunSql, !lastSql || isWorking);
 }
 
 function setWorking(working: boolean, label = "The Oracle is working...") {
@@ -214,7 +216,7 @@ async function runSql(sql: string) {
   setWorking(true, "Running the generated SQL...");
   renderResults(null, "Running the generated SQL...");
   try {
-    const result = await call<SqlQueryResult>("execute_sql_query", {
+    const result = await call<SqlQueryResult>("ai_execute_sql", {
       connectionId: el.connection.value,
       sql,
     });
@@ -230,7 +232,10 @@ async function runSql(sql: string) {
 
 async function submitPrompt() {
   const message = el.prompt.value.trim();
-  if (!message || !ollamaOnline || isWorking) {
+  if (!message || isUnavailable(el.send)) {
+    if (isUnavailable(el.send)) {
+      showUnavailable(el.send);
+    }
     return;
   }
 
@@ -296,34 +301,50 @@ async function reprobe() {
   }
 }
 
+function applyOllamaStatus(status: OllamaStatus) {
+  ollamaOnline = status.online && status.models.length > 0;
+
+  const saved = window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
+  const current = el.model.value || saved;
+  el.model.innerHTML = status.models
+    .map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`)
+    .join("");
+  const preferred = status.models.some((model) => model.name === current) ? current : status.defaultModel ?? "";
+  if (preferred) {
+    el.model.value = preferred;
+  }
+
+  if (!status.online) {
+    setStatus(status.detail ?? "Ollama is offline. Slap it, or start the Ollama app.", "offline");
+  } else if (!status.models.length) {
+    setStatus("Ollama is running but has no models. Pull one (for example `ollama pull hermes3`).", "offline");
+  } else {
+    setStatus(`Ollama online at ${status.baseUrl}.`, "online");
+  }
+  syncControls();
+}
+
+async function slapOllama() {
+  setWorking(true, "Slapping Ollama...");
+  try {
+    applyOllamaStatus(await call<OllamaStatus>("ai_slap_ollama"));
+    appendMessage("system", ollamaOnline ? "Ollama is awake." : "Ollama did not wake up.");
+  } catch (error) {
+    appendMessage("system", `Slap failed: ${errorMessage(error)}`);
+  } finally {
+    setWorking(false);
+  }
+}
+
 async function refreshStatus() {
   setStatus("Checking Ollama status...", "checking");
   try {
-    const status = await call<OllamaStatus>("ai_status");
-    ollamaOnline = status.online && status.models.length > 0;
-
-    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
-    const current = el.model.value || saved;
-    el.model.innerHTML = status.models
-      .map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`)
-      .join("");
-    const preferred = status.models.some((model) => model.name === current) ? current : status.defaultModel ?? "";
-    if (preferred) {
-      el.model.value = preferred;
-    }
-
-    if (!status.online) {
-      setStatus("Ollama is offline. Start Ollama, then press Refresh.", "offline");
-    } else if (!status.models.length) {
-      setStatus("Ollama is running but has no models. Pull one (for example `ollama pull hermes3`).", "offline");
-    } else {
-      setStatus(`Ollama online at ${status.baseUrl}.`, "online");
-    }
+    applyOllamaStatus(await call<OllamaStatus>("ai_status"));
   } catch (error) {
     ollamaOnline = false;
     setStatus(errorMessage(error), "error");
+    syncControls();
   }
-  syncControls();
 }
 
 async function loadConnections() {
@@ -375,6 +396,10 @@ function wireEvents() {
     void refreshStatus();
   });
 
+  el.slap.addEventListener("click", () => {
+    void slapOllama();
+  });
+
   el.reprobe.addEventListener("click", () => {
     void reprobe();
   });
@@ -411,6 +436,8 @@ function wireEvents() {
 }
 
 async function initialize() {
+  watchControlLabels();
+  blockUnavailableControls();
   sqlBridge = readSqlBridge();
   if (sqlBridge && !hasTauriBackend()) {
     startBridgeHeartbeat(sqlBridge);

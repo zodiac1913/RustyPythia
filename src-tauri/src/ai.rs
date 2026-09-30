@@ -17,7 +17,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 use crate::probe::ProbeRelation;
-use crate::{normalize_connection_id, resolve_query_target, run_sql_query, QueryTarget};
+use crate::{normalize_connection_id, resolve_query_target, run_sql_query, QueryTarget, SqlQueryResult};
 
 const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 const OLLAMA_STATUS_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -38,7 +38,8 @@ const PROMPT_HINT_LIMIT: usize = 6;
 const REQUESTED_COLUMN_STOPWORDS: &[&str] = &[
     "how", "many", "much", "are", "was", "were", "the", "and", "for", "each", "per", "every",
     "who", "what", "which", "show", "list", "give", "get", "all", "any", "with", "from", "that",
-    "this", "have", "has", "count", "number", "total",
+    "this", "have", "has", "count", "number", "total", "can", "could", "please", "our", "left",
+    "agency", "anymore", "longer", "still",
 ];
 
 const HR_EMPLOYEE_REQUIRED_FIELDS: &[&str] = &[
@@ -255,6 +256,47 @@ pub async fn ollama_status() -> OllamaStatus {
             detail: Some(detail),
         },
     }
+}
+
+/// Wakes a stopped local Ollama, then waits briefly for it to answer.
+pub async fn slap_ollama() -> OllamaStatus {
+    let current = ollama_status().await;
+    if current.online && !current.models.is_empty() {
+        return current;
+    }
+
+    let _ = wake_ollama();
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let status = ollama_status().await;
+        if status.online && !status.models.is_empty() {
+            return status;
+        }
+    }
+
+    let mut status = ollama_status().await;
+    if !status.online {
+        status.detail = Some("Slapped Ollama, but it did not wake. Start the Ollama app, then Refresh.".into());
+    }
+    status
+}
+
+fn wake_ollama() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("open").args(["-a", "Ollama"]).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    std::process::Command::new("ollama")
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Could not start Ollama: {}", err))
 }
 
 async fn request_ai_decision(model: &str, messages: &[ChatMessage]) -> Result<AiDecision, String> {
@@ -555,6 +597,7 @@ struct SchemaEntry {
     kind: String,
     row_count: Option<i64>,
     primary_key: Vec<String>,
+    identity_key: Vec<String>,
 }
 
 type Schema = Vec<SchemaEntry>;
@@ -564,26 +607,39 @@ type Schema = Vec<SchemaEntry>;
 /// database, so a question does not wait on a full catalog scan.
 async fn load_schema(app: &AppHandle, connection_id: &str) -> Result<(Schema, Vec<ProbeRelation>), String> {
     let probe = crate::probe::load_probe(app, connection_id).await?;
+    let never_prompt = crate::knowledge::never_prompt_columns(app);
     let schema = probe
         .tables
         .iter()
-        .map(|table| SchemaEntry {
-            name: table.name.clone(),
-            columns: table.columns.iter().map(|column| column.name.clone()).collect(),
-            column_types: table
+        .map(|table| {
+            let blocked = never_prompt.get(&table.name);
+            let visible = table
                 .columns
                 .iter()
-                .map(|column| {
-                    if column.nullable {
-                        column.data_type.clone()
-                    } else {
-                        format!("{} NOT NULL", column.data_type)
-                    }
+                .filter(|column| {
+                    !blocked.is_some_and(|columns| {
+                        columns.iter().any(|blocked| blocked.eq_ignore_ascii_case(&column.name))
+                    })
                 })
-                .collect(),
-            kind: table.kind.clone(),
-            row_count: table.row_count,
-            primary_key: table.primary_key.clone(),
+                .collect::<Vec<_>>();
+            SchemaEntry {
+                name: table.name.clone(),
+                columns: visible.iter().map(|column| column.name.clone()).collect(),
+                column_types: visible
+                    .iter()
+                    .map(|column| {
+                        if column.nullable {
+                            column.data_type.clone()
+                        } else {
+                            format!("{} NOT NULL", column.data_type)
+                        }
+                    })
+                    .collect(),
+                kind: table.kind.clone(),
+                row_count: table.row_count,
+                primary_key: table.primary_key.clone(),
+                identity_key: table.identity_key.clone(),
+            }
         })
         .collect();
     Ok((schema, probe.relations.clone()))
@@ -777,6 +833,24 @@ fn score_schema_entry(table_name: &str, columns: &[String], tokens: &[String]) -
 
     let has = |wanted: &str| tokens.iter().any(|token| token == wanted);
     let asks_employees = has("employee") || has("employees");
+    let asks_former = asks_employees
+        && (has("former")
+            || has("separated")
+            || has("inactive")
+            || has("deactivated")
+            || ((has("not") || has("no") || has("longer") || has("anymore")) && (has("active") || has("current"))));
+    let base_name = table_lower.rsplit('.').next().unwrap_or(&table_lower);
+    if asks_former {
+        if base_name == "hr_employee" {
+            score += 80;
+        }
+        if base_name.contains("current") {
+            score -= 120;
+        }
+        if base_name.contains("personnelaction") || base_name.contains("component") {
+            score -= 80;
+        }
+    }
     if asks_employees {
         if has_employee_signal {
             score += 18;
@@ -802,8 +876,19 @@ fn score_schema_entry(table_name: &str, columns: &[String], tokens: &[String]) -
     if asks_employees && has("component") && has_employee_signal && has_component_signal {
         score += 24;
     }
+    if asks_personnel_action_tokens(tokens) && (base_name == "keyvalue" || base_name == "keyvaluedefinition") {
+        score += 90;
+    }
 
     score
+}
+
+fn asks_personnel_action_tokens(tokens: &[String]) -> bool {
+    let has = |wanted: &str| tokens.iter().any(|token| token == wanted);
+    has("noa")
+        || has("noas")
+        || ((has("action") || has("actions") || has("personnelaction"))
+            && (has("personnel") || has("employee") || has("employees") || has("type") || has("types") || has("noa")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1104,10 @@ fn extract_select_clause(sql: &str) -> String {
     }
 }
 
+pub(crate) fn select_clause_for_privacy(sql: &str) -> String {
+    extract_select_clause(sql)
+}
+
 fn extract_sql_selected_columns(sql: &str) -> Vec<String> {
     let clause = extract_select_clause(sql);
     let clause = top_prefix_re().replace(&clause, "").to_string();
@@ -1101,6 +1190,7 @@ struct RelevantTable {
     kind: String,
     row_count: Option<i64>,
     primary_key: Vec<String>,
+    identity_key: Vec<String>,
 }
 
 fn format_count(count: i64) -> String {
@@ -1131,7 +1221,14 @@ fn render_schema_excerpt(tables: &[RelevantTable], relations: &[ProbeRelation]) 
         let key = if table.primary_key.is_empty() {
             String::new()
         } else {
-            format!(" · PK ({})", table.primary_key.join(", "))
+            let auto = table.identity_key.iter().any(|column| {
+                table.primary_key.iter().any(|key| key.eq_ignore_ascii_case(column))
+            });
+            format!(
+                " · PK ({}){}",
+                table.primary_key.join(", "),
+                if auto { " IDENTITY, never null" } else { "" }
+            )
         };
         lines.push(format!("{} [{}, {}{}]", table.table_name, table.kind, size, key));
 
@@ -1423,6 +1520,18 @@ fn build_relevant_schema_subset(app: &AppHandle, schema: &Schema, conversation: 
             }
         }
     }
+    if asks_personnel_action_tokens(&tokens) {
+        for wanted in ["keyvalue", "keyvaluedefinition"] {
+            if let Some(index) = ranked.iter().position(|ranked| {
+                normalize_table_base_name(&ranked.entry.name) == wanted
+                    && ranked.entry.name.to_lowercase().starts_with("core.")
+            }) {
+                if !final_indexes.contains(&index) {
+                    final_indexes.push(index);
+                }
+            }
+        }
+    }
 
     let employee_force = HR_EMPLOYEE_REQUIRED_FIELDS.iter().map(|field| field.to_string()).collect::<Vec<_>>();
 
@@ -1449,7 +1558,21 @@ fn build_relevant_schema_subset(app: &AppHandle, schema: &Schema, conversation: 
                 };
                 select_relevant_columns(&entry.columns, &tokens, &requested_columns, explicit, &force, true)
             } else {
-                select_relevant_columns(&entry.columns, &tokens, &requested_columns, explicit, &[], false)
+                let base = normalize_table_base_name(&entry.name);
+                let lookup_force: Vec<String> = if asks_personnel_action_tokens(&tokens) && base == "keyvalue" {
+                    ["KeyValueCode", "KeyValueDescription", "KeyValueDefinitionIdentifier"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                } else if asks_personnel_action_tokens(&tokens) && base == "keyvaluedefinition" {
+                    ["KeyValueDefinitionName", "KeyValueDefinitionIdentifier"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                select_relevant_columns(&entry.columns, &tokens, &requested_columns, explicit, &lookup_force, false)
             };
 
             let column_types = columns
@@ -1472,6 +1595,7 @@ fn build_relevant_schema_subset(app: &AppHandle, schema: &Schema, conversation: 
                 kind: entry.kind.clone(),
                 row_count: entry.row_count,
                 primary_key: entry.primary_key.clone(),
+                identity_key: entry.identity_key.clone(),
             })
         })
         .collect();
@@ -2080,7 +2204,93 @@ fn normalize_run_query_text(text: &str) -> String {
         .replace(['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'], "\"")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Headcount {
+    Current,
+    Former,
+}
+
+/// Plain headcount questions are answered from the approved rule, not the
+/// model. A small model misreads them, and the answer never changes shape.
+fn headcount_intent(conversation: &[ChatMessage]) -> Option<Headcount> {
+    let user_messages = conversation
+        .iter()
+        .rev()
+        .filter(|message| message.role == "user")
+        .take(3)
+        .map(|message| message.content.to_lowercase())
+        .collect::<Vec<_>>();
+    let latest = user_messages.first()?;
+    let mentions_people = |text: &str| regex(r"\b(employees?|staff|people|workers|personnel)\b").is_match(text);
+    // "Can I get the count" follows up on the last question that named people.
+    let text = if mentions_people(latest) {
+        latest.clone()
+    } else if regex(r"\b(count|how many|number|total)\b").is_match(latest) {
+        user_messages.iter().skip(1).find(|text| mentions_people(text))?.clone()
+    } else {
+        return None;
+    };
+
+    if regex(r"\b(each|per|by|group|breakdown|component|office|division|grade|between|since|in \d{4})\b").is_match(&text) {
+        return None;
+    }
+    if !regex(r"\b(how many|count|number of|total)\b").is_match(&text)
+        && !regex(r"\b(count|how many|number|total)\b").is_match(latest)
+    {
+        return None;
+    }
+
+    let former = regex(
+        r"\b(left|leave|former|separated|separations?|departed|gone|quit|inactive|deactivated|terminated)\b|no longer|not (with|active|current|here|employed)|anymore",
+    )
+    .is_match(&text);
+    let current = regex(r"\b(current|currently|active|still|on board|onboard|employed)\b").is_match(&text);
+    match (former, current) {
+        (true, _) => Some(Headcount::Former),
+        (false, true) => Some(Headcount::Current),
+        _ => None,
+    }
+}
+
+fn headcount_decision(schema: &Schema, intent: Headcount) -> Option<AiDecision> {
+    let table = schema.iter().find(|entry| entry.name.eq_ignore_ascii_case("HR.HR_Employee"))?;
+    let column = |wanted: &str| table.columns.iter().find(|column| column.eq_ignore_ascii_case(wanted)).cloned();
+    let deactivated = column("DeactivateTimeStamp")?;
+    let separated = column("SeparatedDate")?;
+
+    let (alias, filter, explanation) = match intent {
+        Headcount::Former => (
+            "FormerEmployeeCount",
+            format!("{} IS NOT NULL OR {} IS NOT NULL", deactivated, separated),
+            "Former employees are people with a deactivation or separation date.",
+        ),
+        Headcount::Current => (
+            "CurrentEmployeeCount",
+            format!("{} IS NULL AND {} IS NULL", deactivated, separated),
+            "Current employees have no deactivation and no separation date.",
+        ),
+    };
+
+    Some(AiDecision {
+        status: "ready".into(),
+        sql: format!("SELECT COUNT(*) AS {} FROM {} WHERE {};", alias, table.name, filter),
+        explanation: explanation.into(),
+        model: "Rusty Pythia rule".into(),
+        ..AiDecision::default()
+    })
+}
+
 pub(crate) async fn run_ai_assist(app: AppHandle, request: AiAssistRequest) -> Result<AiDecision, String> {
+    let connection_id = normalize_connection_id(request.connection_id.as_deref()).to_string();
+    let conversation = normalize_conversation(&request.conversation);
+    if let Some(intent) = headcount_intent(&conversation) {
+        let (schema, _) = load_schema(&app, &connection_id).await?;
+        if let Some(decision) = headcount_decision(&schema, intent) {
+            crate::write_app_log(&app, "ai.assist", &format!("Rule answered a headcount for {}", connection_id));
+            return Ok(decision);
+        }
+    }
+
     let status = ollama_status().await;
     if !status.online {
         return Err("Ollama is offline. Start Ollama and try again.".into());
@@ -2098,11 +2308,9 @@ pub(crate) async fn run_ai_assist(app: AppHandle, request: AiAssistRequest) -> R
         return Err(format!("Selected Ollama model is unavailable: {}", model));
     }
 
-    let connection_id = normalize_connection_id(request.connection_id.as_deref()).to_string();
     let (connection_type, database_name) = describe_connection(&app, &connection_id)?;
     let (schema, relations) = load_schema(&app, &connection_id).await?;
     let current_query = normalize_run_query_text(request.current_query.as_deref().unwrap_or_default());
-    let conversation = normalize_conversation(&request.conversation);
 
     let mut decision = ask_ollama_for_sql(
         &app,
@@ -2147,6 +2355,14 @@ async fn ask_ollama_for_sql(
     let relevant = build_relevant_schema_subset(app, schema, conversation);
     let echelon_context =
         build_employee_echelon_context(app, connection_id, connection_type, database_name, schema, conversation).await;
+    let docs_context = [
+        crate::knowledge::prompt_excerpt(app, &relevant.latest_user_message),
+        build_schema_docs_context(app, database_name, &relevant),
+    ]
+    .into_iter()
+    .filter(|section| !section.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
 
     let system_prompt = format!(
         "{}\n\n========================\nSQL PLANNING CONTEXT\n========================\n{}",
@@ -2159,7 +2375,7 @@ async fn ask_ollama_for_sql(
             relations,
             current_query,
             echelon_context: &echelon_context,
-            docs_context: build_schema_docs_context(app, database_name, &relevant),
+            docs_context,
         })
     );
 
@@ -2191,8 +2407,9 @@ async fn ask_ollama_for_sql(
     if decision.is_ready_with_sql() {
         let validation = validate_generated_sql(&decision.sql, schema, connection_type, &relevant.requested_columns);
         let pii_issues = validate_restricted_pii_projection(&decision.sql);
+        let statistic_issues = crate::knowledge::statistic_issues(app, &decision.sql);
 
-        if !validation.valid || !pii_issues.is_empty() {
+        if !validation.valid || !pii_issues.is_empty() || !statistic_issues.is_empty() {
             let issue_line = |label: &str, issues: &[String]| {
                 if issues.is_empty() {
                     format!("{}: none", label)
@@ -2210,6 +2427,7 @@ async fn ask_ollama_for_sql(
                 },
                 issue_line("Additional SQL issues", &validation.issues),
                 issue_line("PII projection issues", &pii_issues),
+                issue_line("Statistical privacy issues", &statistic_issues),
                 "Rewrite the SQL using only these exact available tables and their exact columns:".to_string(),
                 render_schema_excerpt(&relevant.relevant_tables, relations),
                 "For age questions (for example over 55 years old), do not use CareerStartDate/HireDate/StartDate as age proxies. Use DateOfBirth/BirthDate (or an explicit Age column) when available.".to_string(),
@@ -2243,17 +2461,20 @@ async fn ask_ollama_for_sql(
                 let revalidated =
                     validate_generated_sql(&decision.sql, schema, connection_type, &relevant.requested_columns);
                 let repaired_pii = validate_restricted_pii_projection(&decision.sql);
-                if !revalidated.valid || !repaired_pii.is_empty() {
-                    let candidates = relevant
-                        .relevant_tables
+                let repaired_statistics = crate::knowledge::statistic_issues(app, &decision.sql);
+                if !revalidated.valid || !repaired_pii.is_empty() || !repaired_statistics.is_empty() {
+                    let asks_employees = relevant
+                        .tokens
                         .iter()
-                        .take(5)
-                        .map(|table| table.table_name.clone())
-                        .collect::<Vec<_>>();
-                    return Ok(AiDecision::clarify(format!(
-                        "I found likely tables in this area: {}. Which one should I use for the employee lookup?",
-                        candidates.join(", ")
-                    )));
+                        .any(|token| token == "employee" || token == "employees");
+                    if asks_employees {
+                        return Ok(AiDecision::clarify(
+                            "Employee counts use HR.HR_Employee. Current people have DeactivateTimeStamp and SeparatedDate null. Former people have either one set. Current views and personnel actions do not answer that. Please ask again for the count.",
+                        ));
+                    }
+                    return Ok(AiDecision::clarify(
+                        "I could not produce a safe aggregate from the approved tables. Please restate the count you want.",
+                    ));
                 }
             }
         }
@@ -2273,6 +2494,12 @@ async fn ask_ollama_for_sql(
 
     if decision.is_ready_with_sql() {
         learn_schema_hints(app, &relevant.latest_user_message, &decision.sql);
+        crate::knowledge::record_proposal(
+            app,
+            connection_id,
+            &relevant.latest_user_message,
+            &decision.sql,
+        );
     }
 
     Ok(decision)
@@ -2288,13 +2515,54 @@ pub async fn ai_status() -> Result<OllamaStatus, String> {
 }
 
 #[tauri::command]
+pub async fn ai_slap_ollama() -> Result<OllamaStatus, String> {
+    Ok(slap_ollama().await)
+}
+
+#[tauri::command]
 pub async fn ai_assist(app: AppHandle, request: AiAssistRequest) -> Result<AiDecision, String> {
     run_ai_assist(app, request).await
+}
+
+/// AI-window execution is aggregate-only and privacy filtered. The normal SQL
+/// command remains unrestricted.
+#[tauri::command]
+pub async fn ai_execute_sql(
+    app: AppHandle,
+    connection_id: Option<String>,
+    sql: String,
+) -> Result<SqlQueryResult, String> {
+    if !is_read_only_sql(&sql) {
+        return Err("The AI window can run read-only queries only.".into());
+    }
+    let issues = crate::knowledge::statistic_issues(&app, &sql);
+    if !issues.is_empty() {
+        return Err(issues.join(" "));
+    }
+    let result = run_sql_query(app, connection_id, sql.clone()).await?;
+    Ok(crate::knowledge::suppress_small_groups(result, &sql))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user(text: &str) -> ChatMessage {
+        ChatMessage { role: "user".into(), content: text.into() }
+    }
+
+    #[test]
+    fn headcount_questions_skip_the_model() {
+        assert_eq!(headcount_intent(&[user("how many employees have left the Agency?")]), Some(Headcount::Former));
+        assert_eq!(headcount_intent(&[user("how many employees are no longer active")]), Some(Headcount::Former));
+        assert_eq!(headcount_intent(&[user("count how many employees have left the Agency?")]), Some(Headcount::Former));
+        assert_eq!(headcount_intent(&[user("how many active employees do we have")]), Some(Headcount::Current));
+        assert_eq!(
+            headcount_intent(&[user("how many employees have left the Agency?"), user("can I get the count")]),
+            Some(Headcount::Former)
+        );
+        assert_eq!(headcount_intent(&[user("how many active employees are in each component?")]), None);
+    }
 
     #[test]
     fn read_only_guard_blocks_writes() {

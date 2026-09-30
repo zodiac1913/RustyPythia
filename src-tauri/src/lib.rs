@@ -1,5 +1,6 @@
 mod ai;
 mod bridge;
+mod knowledge;
 mod probe;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -2365,7 +2366,9 @@ pub fn run() {
             open_workspace_window,
             open_ai_window,
             ai::ai_status,
+            ai::ai_slap_ollama,
             ai::ai_assist,
+            ai::ai_execute_sql,
             probe::probe_schema,
             execute_sql_query,
             load_sql_schema,
@@ -2383,6 +2386,7 @@ pub fn run() {
         ])
         .setup(|app| {
             ensure_workspace_database(&app.handle())?;
+            knowledge::install(&app.handle())?;
             build_internal_window(app)?;
             match bridge::start(&app.handle()) {
                 Ok(info) => write_app_log(

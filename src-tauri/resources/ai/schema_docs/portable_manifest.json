@@ -4514,9 +4514,15 @@
       "table": "KeyValue",
       "qualifiedName": "CORE.KeyValue",
       "priority": "primary schema",
-      "summary": "Business-critical table in the CORE schema related to key value.",
-      "usageNotes": [],
-      "conventionalJoins": [],
+      "summary": "Id-to-text rows. KeyValueCode is the stored id and KeyValueDescription is the text.",
+      "usageNotes": [
+        "Most id-to-text data is stored here, under a CORE.KeyValueDefinition.",
+        "Personnel action types are the NOA key values for actions. Join HR.HR_PersonnelAction.Noa to KeyValueCode."
+      ],
+      "conventionalJoins": [
+        "CORE.KeyValueDefinition on KeyValueDefinitionIdentifier",
+        "HR.HR_PersonnelAction.Noa = CORE.KeyValue.KeyValueCode for the NOA definition"
+      ],
       "rowCount": 61572,
       "primaryKey": [
         "KeyValueIdentifier"
@@ -4720,9 +4726,14 @@
       "table": "KeyValueDefinition",
       "qualifiedName": "CORE.KeyValueDefinition",
       "priority": "primary schema",
-      "summary": "Business-critical table in the CORE schema related to key value definition.",
-      "usageNotes": [],
-      "conventionalJoins": [],
+      "summary": "Names each id-to-text list. KeyValueDefinitionName identifies the list.",
+      "usageNotes": [
+        "Use KeyValueDefinitionName to choose a list, including the NOA list for personnel action types.",
+        "CORE.KeyValue rows belong to a definition through KeyValueDefinitionIdentifier."
+      ],
+      "conventionalJoins": [
+        "CORE.KeyValue on KeyValueDefinitionIdentifier"
+      ],
       "rowCount": 142,
       "primaryKey": [
         "KeyValueDefinitionIdentifier"
@@ -21593,7 +21604,7 @@
       "usageNotes": [
         "Primary candidate table for employee action questions such as appointments, reassignments, separations, or other personnel events.",
         "Use this table when HR.HR_Employee is not sufficient because the user is asking about the action itself rather than the employee's current state.",
-        "High-value fields are usually Noa, NoaDescription, PersonnelActionSubmissionDate, PersonnelActionEffectiveDate, and the component and pay-period fields attached to the action.",
+        "Action types are the NOA key values. Join Noa to CORE.KeyValue.KeyValueCode for the NOA definition in CORE.KeyValueDefinition, and use KeyValueDescription as the action type text.",
         "This table can often answer both what happened and when it happened, while HR.HR_Employee mainly answers what is true now."
       ],
       "conventionalJoins": [],

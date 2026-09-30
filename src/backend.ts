@@ -14,7 +14,9 @@ const BRIDGE_ROUTES: Record<string, string> = {
   load_sql_schema: "schema",
   load_preset_store: "presets",
   ai_status: "ai/status",
+  ai_slap_ollama: "ai/slap",
   ai_assist: "ai/assist",
+  ai_execute_sql: "ai/query",
   probe_schema: "ai/probe",
 };
 

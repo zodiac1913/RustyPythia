@@ -1,0 +1,86 @@
+[
+  {
+    "id": "hr-employee-population",
+    "term": "employee",
+    "meaning": "People are in HR.HR_Employee. Current employees have both DeactivateTimeStamp and SeparatedDate null. Former employees (no longer with us) have DeactivateTimeStamp not null or SeparatedDate not null. Never treat a null EmployeeIdentifier as gone. Answer with counts or other aggregates only. Do not return names, emails, identifiers, addresses, phones, or birth dates.",
+    "tables": ["HR.HR_Employee"],
+    "privacy": {
+      "neverPrompt": ["SocialSecurityNumber"],
+      "filterOnly": [
+        "EmployeeIdentifier", "PersonnelNumber", "UserIdentifier", "LastName", "FirstName",
+        "MiddleName", "NickName", "LastFirstName", "FirstLastName", "LegalLastFirstName",
+        "LegalFirstLastName", "UserLastFirstName", "Moniker", "BirthDate", "WorkPhone",
+        "WorkPhoneExtension", "Email", "ManagerEmployeeIdentifier", "ManagerUserIdentifier",
+        "ManagerLastFirstName", "ManagerFirstLastName", "ManagerPhone", "ManagerEmail",
+        "LogonName", "HhsIdentifier"
+      ],
+      "aggregateOnly": [
+        "Salary", "TotalSalary", "RaceNationalOrigin", "RaceNationalOriginDescription",
+        "Sex", "SexDescription", "VeteranPreference", "VeteranPreferenceDescription",
+        "VietnamEraVeteran", "VietnamEraVeteranDescription", "EthnicityRaceCode"
+      ]
+    }
+  },
+  {
+    "id": "hr-employee-history",
+    "term": "employee history",
+    "meaning": "Past employee rows are in HR.HR_EmployeeHistory. Use it for change over time. Do not use it as the current headcount unless the question asks for history.",
+    "tables": ["HR.HR_EmployeeHistory"],
+    "privacy": {
+      "neverPrompt": ["SocialSecurityNumber"],
+      "filterOnly": [
+        "EmployeeHistoryIdentifier", "EmployeeIdentifier", "PersonnelNumber", "UserIdentifier",
+        "LastName", "FirstName", "MiddleName", "NickName", "LastFirstName", "FirstLastName",
+        "LegalLastFirstName", "LegalFirstLastName", "UserLastFirstName", "Moniker", "BirthDate",
+        "WorkPhone", "WorkPhoneExtension", "Email", "ManagerEmployeeIdentifier",
+        "ManagerUserIdentifier", "ManagerLastFirstName", "ManagerFirstLastName", "ManagerPhone",
+        "ManagerEmail", "LogonName", "HhsIdentifier"
+      ],
+      "aggregateOnly": [
+        "Salary", "TotalSalary", "RaceNationalOrigin", "RaceNationalOriginDescription",
+        "Sex", "SexDescription", "VeteranPreference", "VeteranPreferenceDescription",
+        "VietnamEraVeteran", "VietnamEraVeteranDescription", "EthnicityRaceCode"
+      ]
+    }
+  },
+  {
+    "id": "hr-personnel-action",
+    "term": "personnel action",
+    "meaning": "HR.HR_PersonnelAction is the authoritative table for employee and personnel actions; this is known, not an assumption. Each row is one action. Never invent PersonnelActionCategory or any other field. Noa is the Nature of Action code. Resolve its action type by joining HR.HR_PersonnelAction.Noa to CORE.KeyValue.KeyValueCode, then joining CORE.KeyValue.KeyValueDefinitionIdentifier to CORE.KeyValueDefinition.KeyValueDefinitionIdentifier and requiring KeyValueDefinitionName = 'NOA'. Use CORE.KeyValue.KeyValueDescription as the action type text; for wording such as pay adjustments, filter that description rather than inventing a category column. PersonnelActionEffectiveDate is when an action took effect; PersonnelActionSubmissionDate is when it was submitted. For a calendar-year action count, use an inclusive start and exclusive next-year boundary on PersonnelActionEffectiveDate unless the user specifically asks about submissions. Count or summarize actions only; never list the employees involved.",
+    "tables": ["HR.HR_PersonnelAction", "CORE.KeyValue", "CORE.KeyValueDefinition"],
+    "privacy": {
+      "neverPrompt": ["SocialSecurityNumber", "OldSocialSecurityNumber", "NewSocialSecurityNumber"],
+      "filterOnly": [
+        "PersonnelActionIdentifier", "EmployeeIdentifier", "EmployeeHistoryIdentifier",
+        "PersonnelNumber", "LastName", "FirstName", "MiddleName"
+      ],
+      "aggregateOnly": [
+        "Salary", "RaceNationalOrigin", "RaceNationalOriginDescription", "Sex", "SexDescription",
+        "VeteranPreference", "VeteranPreferenceDescription", "VietnamEraVeteran",
+        "VietnamEraVeteranDescription"
+      ]
+    }
+  },
+  {
+    "id": "core-key-value",
+    "term": "key value",
+    "meaning": "CORE.KeyValue holds most id-to-text values. KeyValueCode is the stored id and KeyValueDescription is the text. Each row belongs to one list through KeyValueDefinitionIdentifier. Personnel action types are the NOA key values for actions: join HR.HR_PersonnelAction.Noa to KeyValueCode.",
+    "tables": ["CORE.KeyValue", "CORE.KeyValueDefinition", "HR.HR_PersonnelAction"],
+    "privacy": {
+      "neverPrompt": ["AddUserIdentifier", "LastUpdateUserIdentifier"],
+      "filterOnly": ["KeyValueIdentifier"],
+      "aggregateOnly": []
+    }
+  },
+  {
+    "id": "core-key-value-definition",
+    "term": "key value definition",
+    "meaning": "CORE.KeyValueDefinition names each id-to-text list. KeyValueDefinitionName identifies the list, including the NOA list for personnel action types. CORE.KeyValue rows for that list share its KeyValueDefinitionIdentifier.",
+    "tables": ["CORE.KeyValueDefinition", "CORE.KeyValue"],
+    "privacy": {
+      "neverPrompt": ["AddUserIdentifier", "LastUpdateUserIdentifier"],
+      "filterOnly": ["KeyValueDefinitionIdentifier", "TaskDefinitionIdentifier"],
+      "aggregateOnly": []
+    }
+  }
+]
