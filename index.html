@@ -82,8 +82,12 @@
                 <div id="squerrl-picker-options" class="squerrl-picker__options"></div>
               </section>
               <div class="sql-editor-form__actions">
-                <sml-reactive-button type="button" id="run-sql-button" class="btn btn-sm btn-rusty-primary" title="Run the current query (F5)" aria-label="Run the current query" data-icon="bi bi-play-fill" data-text="Run SQL [F5]"></sml-reactive-button>
-                <sml-reactive-button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" title="Clear the editor and results (F8)" aria-label="Clear the editor and results" data-icon="bi bi-eraser" data-text="Clear [F8]"></sml-reactive-button>
+                <sml-reactive-button type="button" id="run-sql-button" class="btn btn-sm btn-rusty-primary" 
+                     title="Run the current query (F5)" aria-label="Run SQL [F5] for the current query" 
+                     data-icon="bi bi-play-fill" data-text="Run SQL [F5]"></sml-reactive-button>
+                <sml-reactive-button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" 
+                     title="Clear [F8] the editor and results" aria-label="Clear [F8] the editor and results" 
+                     data-icon="bi bi-eraser" data-text="Clear [F8]"></sml-reactive-button>
                 <span class="launcher-actions__hint">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
               </div>
             </form>
@@ -93,7 +97,11 @@
                 <div class="sql-results-card__title-row">
                   <h3 id="sql-results-title">Query Results</h3>
                   <div class="sql-results-export">
-                    <sml-reactive-button type="button" id="export-results-button" class="btn btn-sm btn-rusty" aria-haspopup="menu" aria-expanded="false" aria-label="Export query results" data-icon="bi bi-caret-down-square-fill" data-text="Export" disabled></sml-reactive-button>
+                    <sml-reactive-button type="button" id="export-results-button" class="btn btn-sm btn-rusty" 
+                          aria-haspopup="menu" aria-expanded="false" aria-label="Export query results" 
+                          title="Export query results"
+                          data-icon="bi bi-caret-down-square-fill" data-text="Export" disabled>
+                    </sml-reactive-button>
                     <!-- Roving tabindex: the menu pattern moves between items with
                          the arrow keys rather than Tab. -->
                     <div class="export-menu" id="export-results-menu" role="menu" aria-label="Export format" hidden>
