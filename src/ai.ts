@@ -1,4 +1,3 @@
-import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { bridgeInvoke, hasTauriBackend, readSqlBridge, startBridgeHeartbeat, type SqlBridge } from "./backend";
 import { blockUnavailableControls, isUnavailable, setUnavailable, showUnavailable, watchControlLabels } from "./unavailable";
@@ -59,21 +58,21 @@ let renderToken = 0;
 const el = {
   connection: document.querySelector<HTMLSelectElement>("#ai-connection")!,
   model: document.querySelector<HTMLSelectElement>("#ai-model")!,
-  refresh: document.querySelector<HTMLButtonElement>("#ai-refresh-status")!,
-  slap: document.querySelector<HTMLButtonElement>("#ai-slap-ollama")!,
-  reprobe: document.querySelector<HTMLButtonElement>("#ai-reprobe")!,
+  refresh: document.querySelector<HTMLElement>("#ai-refresh-status")!,
+  slap: document.querySelector<HTMLElement>("#ai-slap-ollama")!,
+  reprobe: document.querySelector<HTMLElement>("#ai-reprobe")!,
   status: document.querySelector<HTMLOutputElement>("#ai-status")!,
   conversation: document.querySelector<HTMLDivElement>("#ai-conversation")!,
   progress: document.querySelector<HTMLDivElement>("#ai-progress")!,
   progressLabel: document.querySelector<HTMLSpanElement>("#ai-progress-label")!,
   compose: document.querySelector<HTMLFormElement>("#ai-compose")!,
   prompt: document.querySelector<HTMLTextAreaElement>("#ai-prompt")!,
-  send: document.querySelector<HTMLButtonElement>("#ai-send")!,
-  clear: document.querySelector<HTMLButtonElement>("#ai-clear")!,
+  send: document.querySelector<HTMLElement>("#ai-send")!,
+  clear: document.querySelector<HTMLElement>("#ai-clear")!,
   sql: document.querySelector<HTMLPreElement>("#ai-sql")!,
   sqlNotes: document.querySelector<HTMLDivElement>("#ai-sql-notes")!,
-  copySql: document.querySelector<HTMLButtonElement>("#ai-copy-sql")!,
-  rerunSql: document.querySelector<HTMLButtonElement>("#ai-rerun-sql")!,
+  copySql: document.querySelector<HTMLElement>("#ai-copy-sql")!,
+  rerunSql: document.querySelector<HTMLElement>("#ai-rerun-sql")!,
   resultsStatus: document.querySelector<HTMLParagraphElement>("#ai-results-status")!,
   resultsOutput: document.querySelector<HTMLDivElement>("#ai-results-output")!,
 };
@@ -101,6 +100,13 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Changes only the visible label so sml-reactive-button keeps its icon markup. */
+function setButtonText(button: HTMLElement, text: string) {
+  button.dataset.text = text;
+  const label = button.querySelector(".smlRBText");
+  if (label) label.textContent = text;
+}
+
 function setStatus(message: string, state: "checking" | "online" | "offline" | "error") {
   el.status.textContent = message;
   el.status.dataset.state = state;
@@ -108,15 +114,16 @@ function setStatus(message: string, state: "checking" | "online" | "offline" | "
 
 function syncControls() {
   const canAsk = ollamaOnline && !isWorking;
-  setUnavailable(el.send, !canAsk);
-  setUnavailable(el.clear, isWorking);
+  const busy = "The Oracle is working";
+  setUnavailable(el.send, !canAsk, isWorking ? busy : !ollamaOnline ? "Ollama is offline" : undefined);
+  setUnavailable(el.clear, isWorking, isWorking ? busy : undefined);
   setUnavailable(el.connection, isWorking);
   setUnavailable(el.model, isWorking || !ollamaOnline || el.model.options.length === 0);
-  setUnavailable(el.refresh, isWorking);
-  setUnavailable(el.slap, isWorking);
-  setUnavailable(el.reprobe, isWorking);
-  setUnavailable(el.copySql, !lastSql);
-  setUnavailable(el.rerunSql, !lastSql || isWorking);
+  setUnavailable(el.refresh, isWorking, isWorking ? busy : undefined);
+  setUnavailable(el.slap, isWorking, isWorking ? busy : undefined);
+  setUnavailable(el.reprobe, isWorking, isWorking ? busy : undefined);
+  setUnavailable(el.copySql, !lastSql, lastSql ? undefined : "No SQL to copy yet");
+  setUnavailable(el.rerunSql, !lastSql || isWorking, isWorking ? busy : !lastSql ? "No SQL to run yet" : undefined);
 }
 
 function setWorking(working: boolean, label = "The Oracle is working...") {
@@ -385,6 +392,11 @@ function wireEvents() {
     }
   });
 
+  // sml-reactive-button is not a form control, so it cannot submit the compose form itself.
+  el.send.addEventListener("click", () => {
+    void submitPrompt();
+  });
+
   el.clear.addEventListener("click", () => {
     resetConversation("Conversation cleared. Ask for a result in plain English.");
     showSql(null);
@@ -421,8 +433,8 @@ function wireEvents() {
     }
     try {
       await navigator.clipboard.writeText(lastSql);
-      el.copySql.textContent = "Copied";
-      window.setTimeout(() => (el.copySql.textContent = "Copy"), 1500);
+      setButtonText(el.copySql, "Copied");
+      window.setTimeout(() => setButtonText(el.copySql, "Copy"), 1500);
     } catch (error) {
       appendMessage("system", `Could not copy the SQL: ${errorMessage(error)}`);
     }

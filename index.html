@@ -3,10 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/catsStrap.css" />
+    <link rel="stylesheet" href="/src/bootstrap/icons/font/bootstrap-icons.css" />
+    <link rel="stylesheet" href="/src/bootstrap/css/bootstrap.min.css" />
     <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="stylesheet" href="/src/sml/sml.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rusty Pythia</title>
     <script type="module" src="/src/main.ts" defer></script>
+    <script type="module" src="/src/sml/sml.js" defer></script>
+    <script type="module" src="/src/sml/smlReactiveButton.js" defer></script>
+    <script type="module" src="/src/bootstrap/js/bootstrap.bundle.min.js"></script>
   </head>
 
   <body>
@@ -33,7 +39,11 @@
                 <select id="database-selector" class="database-selector form-select form-select-sm" style="max-width: 250px" aria-label="Select database target">
                   <option value="internal">Internal workspace database</option>
                 </select>
-                <button type="button" id="toggle-favorite-database" class="favorite-toggle btn btn-sm btn-outline-secondary" aria-label="Set as default" title="Set as default">★</button>
+                <sml-reactive-button type="button" id="toggle-favorite-database"
+                     class="favorite-toggle btn btn-sm btn-outline-secondary" aria-label="Set as default"
+                     title="Set as default" data-icon="bi bi-star-fill" data-icon-only="true"
+                     data-text="Set as default"></sml-reactive-button>
+
               </div>
             </div>
 
@@ -47,7 +57,7 @@
                     <option value="sql">SQL Assist</option>
                     <option value="freeform">Non Assist</option>
                   </select>
-                  <button type="button" id="query-search-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="Query Search saved queries" title="Query Search and filter saved queries by date">Query Search</button>
+                  <sml-reactive-button type="button" id="query-search-button" class="query-search-button btn btn-sm btn-outline-primary" aria-label="Query Search saved queries" title="Query Search and filter saved queries by date" data-icon="bi bi-search" data-text="Query Search"></sml-reactive-button>
                 </div>
               </div>
               <textarea
@@ -72,8 +82,8 @@
                 <div id="squerrl-picker-options" class="squerrl-picker__options"></div>
               </section>
               <div class="sql-editor-form__actions">
-                <button type="button" id="run-sql-button" class="btn btn-sm btn-rusty-primary" title="Run the current query (F5)" aria-label="Run the current query">Run SQL [F5]</button>
-                <button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" title="Clear the editor and results (F8)" aria-label="Clear the editor and results">Clear [F8]</button>
+                <sml-reactive-button type="button" id="run-sql-button" class="btn btn-sm btn-rusty-primary" title="Run the current query (F5)" aria-label="Run the current query" data-icon="bi bi-play-fill" data-text="Run SQL [F5]"></sml-reactive-button>
+                <sml-reactive-button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" title="Clear the editor and results (F8)" aria-label="Clear the editor and results" data-icon="bi bi-eraser" data-text="Clear [F8]"></sml-reactive-button>
                 <span class="launcher-actions__hint">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
               </div>
             </form>
@@ -83,7 +93,7 @@
                 <div class="sql-results-card__title-row">
                   <h3 id="sql-results-title">Query Results</h3>
                   <div class="sql-results-export">
-                    <button type="button" id="export-results-button" class="btn btn-sm btn-rusty" aria-haspopup="menu" aria-expanded="false" aria-label="Export query results">Export</button>
+                    <sml-reactive-button type="button" id="export-results-button" class="btn btn-sm btn-rusty" aria-haspopup="menu" aria-expanded="false" aria-label="Export query results" data-icon="bi bi-caret-down-square-fill" data-text="Export" disabled></sml-reactive-button>
                     <!-- Roving tabindex: the menu pattern moves between items with
                          the arrow keys rather than Tab. -->
                     <div class="export-menu" id="export-results-menu" role="menu" aria-label="Export format" hidden>
@@ -124,7 +134,7 @@
                 Additional SQL Window
               </h2>
               <div class="launcher-menu">
-                <button
+                <sml-reactive-button
                   type="button"
                   id="launch-menu-button"
                   class="btn btn-sm btn-rusty"
@@ -132,9 +142,9 @@
                   aria-expanded="false"
                   aria-controls="launch-menu"
                   title="Open another Rusty Pythia workspace"
-                >
-                  Launch SQL App
-                </button>
+                  data-icon="bi bi-window-plus"
+                  data-text="Launch SQL App"
+                ></sml-reactive-button>
                 <div class="launch-menu" id="launch-menu" role="menu" hidden>
                   <button type="button" role="menuitem" id="open-tauri-button">
                     Open in Tauri Window
@@ -147,19 +157,20 @@
                   </button>
                 </div>
               </div>
-              <button
+              <sml-reactive-button
                 type="button"
                 id="launch-help-button"
                 class="btn btn-sm btn-rusty launcher-help"
                 title="What is this for?"
                 aria-label="What is Additional SQL Window for?"
-              >
-                ?
-              </button>
+                data-icon="bi bi-question-circle"
+                data-icon-only="true"
+                data-text="What is Additional SQL Window for?"
+              ></sml-reactive-button>
               <p id="launch-msg" class="launch-msg" aria-live="polite"></p>
             </div>
             <div class="mt-2">
-              <button type="button" id="app-log-button" class="btn btn-sm btn-rusty" aria-label="View application log" title="View application log and audit events">View application log</button>
+              <sml-reactive-button type="button" id="app-log-button" class="btn btn-sm btn-rusty" aria-label="View application log" title="View application log and audit events" data-icon="bi bi-journal-text" data-text="View application log"></sml-reactive-button>
             </div>
           </section>
         </div>
@@ -190,7 +201,7 @@
       <div class="launcher-modal__body">
         <div class="preset-list__header">
           <h2 id="launcher-help-title">About Additional SQL Window</h2>
-          <button type="button" class="footer-link" id="close-launcher-help-button">Close</button>
+          <sml-reactive-button type="button" class="footer-link" id="close-launcher-help-button" title="Close" data-icon="bi bi-x-lg" data-text="Close"></sml-reactive-button>
         </div>
 
         <p class="section-note">
@@ -210,7 +221,7 @@
       <form class="preset-form connection-modal__form" id="preset-form" method="dialog">
         <div class="preset-list__header">
           <h2 id="connection-modal-title">Add External Connection</h2>
-          <button type="button" class="footer-link" id="close-connection-modal-button">Close</button>
+          <sml-reactive-button type="button" class="footer-link" id="close-connection-modal-button" title="Close" data-icon="bi bi-x-lg" data-text="Close"></sml-reactive-button>
         </div>
 
         <input id="preset-id" type="hidden" />
@@ -261,9 +272,9 @@
         <input id="preset-password" type="password" placeholder="Stored in your OS keychain, never on disk" />
 
         <div class="preset-form__actions">
-          <button type="submit" id="save-preset-button">Save Connection</button>
-          <button type="button" id="test-preset-button">Test Connection</button>
-          <button type="button" id="reset-preset-button">New Connection</button>
+          <sml-reactive-button type="button" id="save-preset-button" class="smlRB" title="Save Connection" data-icon="bi bi-floppy" data-text="Save Connection"></sml-reactive-button>
+          <sml-reactive-button type="button" id="test-preset-button" class="smlRB" title="Test Connection" data-icon="bi bi-plug" data-text="Test Connection"></sml-reactive-button>
+          <sml-reactive-button type="button" id="reset-preset-button" class="smlRB" title="New Connection" data-icon="bi bi-plus-circle" data-text="New Connection"></sml-reactive-button>
         </div>
       </form>
     </dialog>
@@ -272,7 +283,7 @@
       <form class="preset-form connection-modal__form" id="password-renewal-form" method="dialog">
         <div class="preset-list__header">
           <h2 id="password-renewal-title">Renew Database Password</h2>
-          <button type="button" class="footer-link" id="close-password-renewal-button">Cancel</button>
+          <sml-reactive-button type="button" class="footer-link" id="close-password-renewal-button" title="Cancel" data-icon="bi bi-x-lg" data-text="Cancel"></sml-reactive-button>
         </div>
 
         <p id="password-renewal-message">
@@ -289,7 +300,7 @@
         <input id="password-renewal-verify" type="password" autocomplete="new-password" required />
 
         <div class="preset-form__actions">
-          <button type="submit" id="renew-password-button">Renew Password</button>
+          <sml-reactive-button type="button" id="renew-password-button" class="smlRB" title="Renew Password" data-icon="bi bi-key" data-text="Renew Password"></sml-reactive-button>
         </div>
       </form>
     </dialog>
@@ -298,7 +309,7 @@
       <form class="query-search-form" id="query-search-form" method="dialog">
         <div class="query-search-modal__header">
           <h2 id="query-search-modal-title">Search Saved Queries</h2>
-          <button type="button" class="footer-link" id="close-query-search-modal-button">Close</button>
+          <sml-reactive-button type="button" class="footer-link" id="close-query-search-modal-button" title="Close" data-icon="bi bi-x-lg" data-text="Close"></sml-reactive-button>
         </div>
 
         <div class="query-search-form__row">
@@ -324,8 +335,8 @@
         </div>
 
         <div class="query-search-form__actions">
-          <button type="button" id="load-query-from-search-button" class="query-search-form__button">Load Query to Workspace</button>
-          <button type="button" id="clear-query-search-button" class="query-search-form__button">Clear Search</button>
+          <sml-reactive-button type="button" id="load-query-from-search-button" class="query-search-form__button" title="Load Query to Workspace" data-icon="bi bi-box-arrow-in-down" data-text="Load Query to Workspace"></sml-reactive-button>
+          <sml-reactive-button type="button" id="clear-query-search-button" class="query-search-form__button" title="Clear Search" data-icon="bi bi-x-circle" data-text="Clear Search"></sml-reactive-button>
         </div>
       </form>
     </dialog>
@@ -334,7 +345,7 @@
       <form class="app-log-form" id="app-log-form" method="dialog">
         <div class="query-search-modal__header">
           <h2 id="app-log-modal-title">Application Log</h2>
-          <button type="button" class="footer-link" id="close-app-log-modal-button">Close</button>
+          <sml-reactive-button type="button" class="footer-link" id="close-app-log-modal-button" title="Close" data-icon="bi bi-x-lg" data-text="Close"></sml-reactive-button>
         </div>
 
         <div class="query-search-form__row">
@@ -366,8 +377,8 @@
         </div>
 
         <div class="query-search-form__actions">
-          <button type="button" id="refresh-app-log-button" class="query-search-form__button">Refresh</button>
-          <button type="button" id="clear-app-log-filters-button" class="query-search-form__button">Clear Filters</button>
+          <sml-reactive-button type="button" id="refresh-app-log-button" class="query-search-form__button" title="Refresh" data-icon="bi bi-arrow-clockwise" data-text="Refresh"></sml-reactive-button>
+          <sml-reactive-button type="button" id="clear-app-log-filters-button" class="query-search-form__button" title="Clear Filters" data-icon="bi bi-funnel" data-text="Clear Filters"></sml-reactive-button>
         </div>
       </form>
     </dialog>

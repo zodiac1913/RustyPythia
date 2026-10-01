@@ -29,7 +29,14 @@ export function watchControlLabels() {
   }).observe(document.body, { childList: true, subtree: true });
 }
 
+function isReactiveButton(element: Element | null | undefined) {
+  return element instanceof HTMLElement && element.tagName === "SML-REACTIVE-BUTTON";
+}
+
 export function isUnavailable(element: Element | null | undefined) {
+  if (element && isReactiveButton(element)) {
+    return element.hasAttribute("disabled");
+  }
   return element instanceof HTMLElement && element.classList.contains("is-unavailable");
 }
 
@@ -54,15 +61,34 @@ function flashNotAvailable(button: HTMLButtonElement) {
   );
 }
 
-export function showUnavailable(button: HTMLButtonElement | null | undefined) {
-  if (button) {
+/** Reactive buttons already announce their excuse, and rewriting textContent would wipe their markup. */
+export function showUnavailable(button: HTMLElement | null | undefined) {
+  if (button instanceof HTMLButtonElement) {
     flashNotAvailable(button);
   }
 }
 
-/** Marks a control unavailable without the disabled attribute. */
-export function setUnavailable(element: Element | null | undefined, unavailable: boolean) {
+/** sml-reactive-button keeps a disabled control in the tab order and reads data-excuse. */
+function setReactiveUnavailable(element: HTMLElement, unavailable: boolean, excuse?: string) {
+  element.classList.remove("is-unavailable", "border", "border-2", "border-danger");
+  const saved = element.dataset.availableLabel;
+  if (saved) {
+    element.setAttribute("aria-label", saved);
+    delete element.dataset.availableLabel;
+  }
+  if (excuse) element.dataset.excuse = excuse;
+  else delete element.dataset.excuse;
+  if (unavailable) element.setAttribute("disabled", "");
+  else element.removeAttribute("disabled");
+}
+
+/** Marks a control unavailable without the disabled attribute. Reactive buttons use disabled instead. */
+export function setUnavailable(element: Element | null | undefined, unavailable: boolean, excuse?: string) {
   if (!(element instanceof HTMLElement)) {
+    return;
+  }
+  if (isReactiveButton(element)) {
+    setReactiveUnavailable(element, unavailable, excuse);
     return;
   }
   if (element instanceof HTMLButtonElement) {

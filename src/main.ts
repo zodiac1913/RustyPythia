@@ -1,4 +1,3 @@
-import "bootstrap/dist/css/bootstrap.min.css";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -53,21 +52,21 @@ let launcherMsgEl: HTMLElement | null;
 let openTauriButtonEl: HTMLButtonElement | null;
 let openBrowserButtonEl: HTMLButtonElement | null;
 let openAiButtonEl: HTMLButtonElement | null;
-let launchMenuButtonEl: HTMLButtonElement | null;
+let launchMenuButtonEl: HTMLElement | null;
 let launchMenuEl: HTMLElement | null;
 let launchMsgEl: HTMLElement | null;
 let databaseSelectorEl: HTMLSelectElement | null;
-let toggleFavoriteDatabaseEl: HTMLButtonElement | null;
+let toggleFavoriteDatabaseEl: HTMLElement | null;
 let workspaceDbPathEl: HTMLElement | null;
 let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
 let queryLanguageEl: HTMLSelectElement | null;
-let querySearchButtonEl: HTMLButtonElement | null;
-let appLogButtonEl: HTMLButtonElement | null;
-let runSqlButtonEl: HTMLButtonElement | null;
-let clearSqlButtonEl: HTMLButtonElement | null;
+let querySearchButtonEl: HTMLElement | null;
+let appLogButtonEl: HTMLElement | null;
+let runSqlButtonEl: HTMLElement | null;
+let clearSqlButtonEl: HTMLElement | null;
 let squerrlPickerEl: HTMLElement | null;
 let squerrlPickerTitleEl: HTMLElement | null;
 let squerrlPickerStatusEl: HTMLElement | null;
@@ -89,25 +88,25 @@ let sqlResultsOutputEl: HTMLElement | null;
 let sqlResultsLoadingEl: HTMLElement | null;
 let sqlResultsLoadingTextEl: HTMLElement | null;
 let exportResultsMenuEl: HTMLElement | null;
-let exportResultsButtonEl: HTMLButtonElement | null;
+let exportResultsButtonEl: HTMLElement | null;
 let lastSqlQueryResult: SqlQueryResult | null = null;
 let querySearchModalEl: HTMLDialogElement | null;
 let querySearchInputEl: HTMLInputElement | null;
 let queryDateFromEl: HTMLInputElement | null;
 let queryDateToEl: HTMLInputElement | null;
 let querySearchResultsEl: HTMLElement | null;
-let loadQueryFromSearchButtonEl: HTMLButtonElement | null;
-let clearQuerySearchButtonEl: HTMLButtonElement | null;
-let closeQuerySearchModalButtonEl: HTMLButtonElement | null;
+let loadQueryFromSearchButtonEl: HTMLElement | null;
+let clearQuerySearchButtonEl: HTMLElement | null;
+let closeQuerySearchModalButtonEl: HTMLElement | null;
 let appLogModalEl: HTMLDialogElement | null;
 let appLogSearchInputEl: HTMLInputElement | null;
 let appLogKindFilterEl: HTMLSelectElement | null;
 let appLogDateFromEl: HTMLInputElement | null;
 let appLogDateToEl: HTMLInputElement | null;
 let appLogResultsEl: HTMLElement | null;
-let refreshAppLogButtonEl: HTMLButtonElement | null;
-let clearAppLogFiltersButtonEl: HTMLButtonElement | null;
-let closeAppLogModalButtonEl: HTMLButtonElement | null;
+let refreshAppLogButtonEl: HTMLElement | null;
+let clearAppLogFiltersButtonEl: HTMLElement | null;
+let closeAppLogModalButtonEl: HTMLElement | null;
 let presetFormEl: HTMLFormElement | null;
 let presetIdEl: HTMLInputElement | null;
 let presetNameEl: HTMLInputElement | null;
@@ -119,24 +118,24 @@ let presetUsernameEl: HTMLInputElement | null;
 let presetPasswordEl: HTMLInputElement | null;
 let presetAuthModeEl: HTMLSelectElement | null;
 let presetDomainEl: HTMLInputElement | null;
-let testPresetButtonEl: HTMLButtonElement | null;
-let resetPresetButtonEl: HTMLButtonElement | null;
+let testPresetButtonEl: HTMLElement | null;
+let resetPresetButtonEl: HTMLElement | null;
 let connectionModalEl: HTMLDialogElement | null;
-let closeConnectionModalButtonEl: HTMLButtonElement | null;
+let closeConnectionModalButtonEl: HTMLElement | null;
 let passwordRenewalModalEl: HTMLDialogElement | null;
 let passwordRenewalFormEl: HTMLFormElement | null;
 let passwordRenewalMessageEl: HTMLElement | null;
 let passwordRenewalOldEl: HTMLInputElement | null;
 let passwordRenewalNewEl: HTMLInputElement | null;
 let passwordRenewalVerifyEl: HTMLInputElement | null;
-let renewPasswordButtonEl: HTMLButtonElement | null;
-let closePasswordRenewalButtonEl: HTMLButtonElement | null;
+let renewPasswordButtonEl: HTMLElement | null;
+let closePasswordRenewalButtonEl: HTMLElement | null;
 // Which saved connection the renewal dialog is currently rotating. The form
 // under test is not always the active connection, so this cannot be inferred.
 let passwordRenewalTargetId: string | null = null;
 let launcherHelpModalEl: HTMLDialogElement | null;
-let launchHelpButtonEl: HTMLButtonElement | null;
-let closeLauncherHelpButtonEl: HTMLButtonElement | null;
+let launchHelpButtonEl: HTMLElement | null;
+let closeLauncherHelpButtonEl: HTMLElement | null;
 
 type PresetEngine = "mssql" | "postgres" | "sqlite";
 
@@ -805,14 +804,14 @@ function applyRuntimeAvailabilityState() {
   // A bridged session still has the desktop app behind it, so only the
   // features that have no bridge route are switched off.
   if (sqlBridge) {
-    setUnavailable(testPresetButtonEl, true);
+    setUnavailable(testPresetButtonEl, true, "Testing connections needs the desktop app");
     setLauncherMessage("Connected to the desktop SQL bridge. Queries run against your real connections.");
     return;
   }
 
   setUnavailable(databaseSelectorEl, true);
-  setUnavailable(toggleFavoriteDatabaseEl, true);
-  setUnavailable(testPresetButtonEl, true);
+  setUnavailable(toggleFavoriteDatabaseEl, true, "Only the internal database is available in the browser");
+  setUnavailable(testPresetButtonEl, true, "Testing connections needs the desktop app");
   setLauncherMessage("Browser fallback is active. SQL runs against the internal workspace database in this preview.");
 }
 
@@ -1278,7 +1277,7 @@ function nextFrame() {
 
 function syncExportControls() {
   const canExport = Boolean(lastSqlQueryResult?.columns.length);
-  setUnavailable(exportResultsButtonEl, !canExport);
+  setUnavailable(exportResultsButtonEl, !canExport, canExport ? undefined : "Run a query before exporting");
   if (!canExport) {
     closeExportMenu();
   }
@@ -1319,7 +1318,7 @@ async function exportSqlResults(format: ExportFormat) {
   }
 
   try {
-    setUnavailable(exportResultsButtonEl, true);
+    setUnavailable(exportResultsButtonEl, true, "Export in progress");
     const filename = exportFileName(lastSqlQueryResult.connectionLabel, format);
     const rowCount = lastSqlQueryResult.rows.length.toLocaleString();
     const rowLabel = `${rowCount} row${lastSqlQueryResult.rows.length === 1 ? "" : "s"}`;
@@ -2613,19 +2612,44 @@ function setLauncherBusy(isBusy: boolean) {
   setUnavailable(openTauriButtonEl, isBusy);
   setUnavailable(openBrowserButtonEl, isBusy);
   setUnavailable(openAiButtonEl, isBusy);
-  setUnavailable(launchMenuButtonEl, isBusy);
+  setUnavailable(launchMenuButtonEl, isBusy, isBusy ? "A window is already opening" : undefined);
 }
 
 function setPresetBusy(isBusy: boolean) {
-  presetFormEl?.querySelectorAll("input, select, button").forEach((element) => {
-    if (
-      element instanceof HTMLInputElement ||
-      element instanceof HTMLSelectElement ||
-      element instanceof HTMLButtonElement
-    ) {
-      setUnavailable(element, isBusy);
+  presetFormEl?.querySelectorAll("input, select, button, sml-reactive-button").forEach((element) => {
+    setUnavailable(element, isBusy, isBusy ? "Connection is busy" : undefined);
+  });
+}
+
+/**
+ * sml-reactive-button is not a form control, so it cannot submit or be the form's
+ * default button. This restores click-to-submit and Enter-in-a-field submission.
+ */
+function wireReactiveSubmit(form: HTMLFormElement | null, button: HTMLElement | null) {
+  if (!form || !button) {
+    return;
+  }
+  button.addEventListener("click", () => form.requestSubmit());
+  form.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement)) {
+      return;
+    }
+    event.preventDefault();
+    if (!isUnavailable(button)) {
+      form.requestSubmit();
     }
   });
+}
+
+/** Changes only the visible label so sml-reactive-button keeps its icon markup. */
+function setButtonText(button: HTMLElement, text: string) {
+  button.dataset.text = text;
+  const label = button.querySelector(".smlRBText");
+  if (label) {
+    label.textContent = text;
+  } else {
+    button.textContent = text;
+  }
 }
 
 function getLaunchMenuItems() {
@@ -2775,7 +2799,7 @@ async function renewMssqlPassword(event: SubmitEvent) {
   }
 
   try {
-    setUnavailable(renewPasswordButtonEl, true);
+    setUnavailable(renewPasswordButtonEl, true, "Password renewal in progress");
     const result = await invokeBackend<ConnectionTestResult>("renew_mssql_password", {
       connectionId,
       oldPassword,
@@ -2812,8 +2836,8 @@ async function runSql() {
       ? normalizeSQuerrlStatement(editorStatement)
       : null;
     const execution = prepareSqlExecution(editorStatement);
-    setUnavailable(runSqlButtonEl, true);
-    setUnavailable(clearSqlButtonEl, true);
+    setUnavailable(runSqlButtonEl, true, "A query is running");
+    setUnavailable(clearSqlButtonEl, true, "A query is running");
 
     if (bufferedSQuerrlStatement) {
       sqlEditorEl.value = execution.statement;
@@ -2969,7 +2993,7 @@ function initializeApp() {
   // A browser session can only open more browser tabs, so the native-window
   // choice is dropped and the rest open as new tabs.
   if (!hasTauriBackend() && launchMenuButtonEl) {
-    launchMenuButtonEl.textContent = "Launch Another Window";
+    setButtonText(launchMenuButtonEl, "Launch Another Window");
     launchMenuButtonEl.title = "Open another Rusty Pythia workspace or AI window in a new browser tab";
     document
       .querySelector("#launch-tools-title")
@@ -3279,6 +3303,9 @@ function initializeApp() {
   passwordRenewalFormEl?.addEventListener("submit", (event) => {
     void renewMssqlPassword(event);
   });
+
+  wireReactiveSubmit(presetFormEl, document.querySelector<HTMLElement>("#save-preset-button"));
+  wireReactiveSubmit(passwordRenewalFormEl, renewPasswordButtonEl);
 
   querySearchButtonEl?.addEventListener("click", () => {
     openQuerySearchModal();

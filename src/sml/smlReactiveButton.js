@@ -21,7 +21,7 @@ import sml from './sml.js';
 import { apiPostDirect, clip, guid, jmlToHtml, receiptCheckGood, unobtrusiveWait, unobtrusiveWaitOff } from './smlUtils.js';
 "use strict";
 class smlReactiveButton extends HTMLElement {
-  static observedAttributes=["data-api","data-toggler-done","data-active","disabled"];
+  static observedAttributes=["data-api","data-toggler-done","data-active","disabled","data-excuse"];
 
   isTableActionMode(){
     return (this.dataset.apiMode || "").toLowerCase() === "table-action";
@@ -112,12 +112,6 @@ class smlReactiveButton extends HTMLElement {
     if(!srb.type) srb.type="button";
     if(!srb.role) srb.role="button";
     if(!srb.hasAttribute("tabindex")) srb.tabIndex = 0;
-    if (!srb.hasAttribute("onkeydown")) {
-      srb.setAttribute("onkeydown", "if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}");
-    }
-    if (!srb.hasAttribute("onkeyup")) {
-      srb.setAttribute("onkeyup", "if(event.key===' '){event.preventDefault();}");
-    }
     
     // WCAG Fix #14: Use data-text as fallback for aria-label, not generic error message
     const dataText = srb.dataset.text || "";
@@ -313,6 +307,7 @@ class smlReactiveButton extends HTMLElement {
               }
               break;
               case "disabled":
+              case "data-excuse":
               srb.syncDisabledState();
               break;
               default: //WATDUH!
@@ -321,34 +316,78 @@ class smlReactiveButton extends HTMLElement {
       }
   }
 
+  isDisabled() {
+    return this.hasAttribute("disabled") || this.dataset.disabled === "true";
+  }
+
+  disabledExcuse() {
+    return (this.dataset.excuse || "").trim() || "This item is disabled";
+  }
+
+  syncDisabledExcuse() {
+    let srb = this;
+    const excuseId = srb.id + "-excuse";
+    let note = srb.querySelector(".smlRBExcuse");
+    const describedBy = () => (srb.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    if (!srb.isDisabled()) {
+      if (note) note.remove();
+      const remaining = describedBy().filter((id) => id !== excuseId);
+      if (remaining.length) srb.setAttribute("aria-describedby", remaining.join(" "));
+      else srb.removeAttribute("aria-describedby");
+      return;
+    }
+    // Keep the real name. The reason is extra description, not a replacement label.
+    if (!note) {
+      note = document.createElement("span");
+      note.className = "smlRBExcuse visually-hidden";
+      note.id = excuseId;
+      srb.appendChild(note);
+    }
+    note.textContent = srb.disabledExcuse();
+    if (!describedBy().includes(excuseId)) {
+      srb.setAttribute("aria-describedby", describedBy().concat(excuseId).join(" "));
+    }
+  }
+
   syncDisabledState() {
     let srb = this;
-    const isDisabled = srb.hasAttribute("disabled") || srb.dataset.disabled === "true";
+    const isDisabled = srb.isDisabled();
+    srb.syncDisabledExcuse();
     if (isDisabled) {
+      // Native disabled and tabindex -1 remove the control from tab and screen-reader order.
+      // aria-disabled keeps it discoverable and announced as disabled. wire() blocks activation.
       srb.setAttribute("aria-disabled", "true");
-      srb.disabled = true;  // WCAG Fix: Set native disabled attribute for full semantic coverage
-      srb.tabIndex = -1;
+      srb.tabIndex = 0;
       srb.style.setProperty("opacity", "0.65");
       // WCAG Fix #9: Add secondary visual indicator (strikethrough pattern) for color-blind users
       srb.style.setProperty("text-decoration", "line-through");
       srb.style.setProperty("text-decoration-color", "rgba(255, 0, 0, 0.3)");
-      // Don't use pointer-events: none as it can interfere with keyboard event propagation
+      srb.style.setProperty("cursor", "not-allowed");
       return;
     }
 
     srb.removeAttribute("aria-disabled");
-    srb.disabled = false;  // Clear native disabled attribute
     if (!srb.hasAttribute("tabindex")) {
       srb.tabIndex = 0;
     }
     srb.style.removeProperty("opacity");
     srb.style.removeProperty("text-decoration");
     srb.style.removeProperty("text-decoration-color");
+    srb.style.removeProperty("cursor");
   }
 
   wire() {
       let srb = this;
-      if (srb.hasAttribute("disabled") || srb.dataset.disabled === "true") return;
+      if (srb.dataset.disabledGuardWired !== "true") {
+        srb.addEventListener("click", (e) => {
+          if (srb.isDisabled()) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+          }
+        }, true);
+        srb.dataset.disabledGuardWired = "true";
+      }
       const wasPreviouslyWired = srb.dataset.wired === "true";
       const isManualWire = srb.dataset.manualWire === "true";
       const skipApiWiring = wasPreviouslyWired || isManualWire;
@@ -393,7 +432,10 @@ class smlReactiveButton extends HTMLElement {
 
       if(srb.dataset.keyWired!=="true"){
         srb.addEventListener("keydown", (e) => {
-          if (srb.hasAttribute("disabled") || srb.dataset.disabled === "true") return;
+          if (srb.isDisabled()) {
+            if (e.key === "Enter" || e.key === " ") e.preventDefault();
+            return;
+          }
           
           // WCAG Fix: Handle Escape key for close/cancel buttons
           const isCloseButton = srb.dataset.buttonRole === "close" || srb.dataset.cancel === "true" || srb.classList.contains("btn-close");
@@ -894,7 +936,7 @@ class smlReactiveButton extends HTMLElement {
 
   async apiCall() {
     let srb = this;
-    if (srb.hasAttribute("disabled") || srb.dataset.disabled === "true") return;
+    if (srb.isDisabled()) return;
     if ((srb.dataset.apiMode || "").toLowerCase() === "change-role") {
       await srb.apiCallChangeRole();
       return;

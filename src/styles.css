@@ -479,7 +479,8 @@ body::after {
   padding: 0.45em 0.9em;
 }
 
-.preset-form__actions button {
+.preset-form__actions button,
+.preset-form__actions sml-reactive-button {
   min-width: 132px;
 }
 
@@ -599,6 +600,18 @@ body::after {
 #query-search-button,
 #app-log-button {
   white-space: nowrap;
+}
+
+#query-search-button {
+  width: auto;
+  min-width: max-content;
+  flex: 0 0 auto;
+}
+
+#query-search-button .smlRBText {
+  overflow: visible;
+  max-width: none;
+  text-overflow: clip;
 }
 
 .sql-editor-form__actions {
@@ -1136,7 +1149,8 @@ h1 {
 input,
 select,
 textarea,
-button {
+button,
+sml-reactive-button {
   border-radius: 8px;
   border: 1px solid rgba(177, 88, 61, 0.14);
   padding: 0.6em 1.2em;
@@ -1165,7 +1179,8 @@ textarea {
   min-height: 7.5rem;
 }
 
-button {
+button,
+sml-reactive-button {
   cursor: pointer;
 }
 
@@ -1188,10 +1203,12 @@ button {
   background: transparent;
 }
 
-button:hover {
+button:hover,
+sml-reactive-button:hover {
   border-color: var(--accent-rust);
 }
-button:active {
+button:active,
+sml-reactive-button:active {
   border-color: var(--accent-rust-deep);
   background-color: #f0ddd6;
 }
@@ -1200,7 +1217,8 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
-button:focus-visible {
+button:focus-visible,
+sml-reactive-button:focus-visible {
   outline: 3px solid var(--accent-rust);
   outline-offset: 3px;
 }
@@ -1755,11 +1773,13 @@ button:focus-visible {
 
   input,
   select,
-  button {
+  button,
+  sml-reactive-button {
     color: #ffffff;
     background-color: rgba(58, 35, 30, 0.5);
   }
-  button:active {
+  button:active,
+  sml-reactive-button:active {
     background-color: rgba(84, 44, 31, 0.72);
   }
 }

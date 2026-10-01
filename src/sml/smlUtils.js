@@ -5,7 +5,6 @@
 /* eslint-disable no-console */
 "use strict";
 import { ensureSmlModalHelpers as ensureSmlModalRuntime, smlModalBox } from "./smlModal.js";
-import { smlCompliance, runComplianceAudit } from "/tzedek/smlCompliance.js";
 
 const RESERVED_JML_KEYS = new Set(["n", "b", "t", "i", "c", "s", "ttl", "html", "innerHTML", "text"]);
 
@@ -1119,13 +1118,3 @@ export async function isHtml(content){
   elem.innerHTML = content.trim();
   return elem.content.children.length > 0;
 }
-
-// Re-export smlCompliance and runComplianceAudit for convenience
-export { smlCompliance, runComplianceAudit };
-
-document.addEventListener('DOMContentLoaded', function() {
-  // smlCompliance loaded for accessibility auditing
-  globalThis.smlCompliance = smlCompliance;
-  globalThis.runComplianceAudit = runComplianceAudit;
-
-});
