@@ -2641,17 +2641,6 @@ function wireReactiveSubmit(form: HTMLFormElement | null, button: HTMLElement | 
   });
 }
 
-/** Changes only the visible label so sml-reactive-button keeps its icon markup. */
-function setButtonText(button: HTMLElement, text: string) {
-  button.dataset.text = text;
-  const label = button.querySelector(".smlRBText");
-  if (label) {
-    label.textContent = text;
-  } else {
-    button.textContent = text;
-  }
-}
-
 function getLaunchMenuItems() {
   if (!launchMenuEl) {
     return [] as HTMLButtonElement[];
@@ -2993,8 +2982,6 @@ function initializeApp() {
   // A browser session can only open more browser tabs, so the native-window
   // choice is dropped and the rest open as new tabs.
   if (!hasTauriBackend() && launchMenuButtonEl) {
-    setButtonText(launchMenuButtonEl, "Launch Another Window");
-    launchMenuButtonEl.title = "Open another Rusty Pythia workspace or AI window in a new browser tab";
     document
       .querySelector("#launch-tools-title")
       ?.setAttribute("title", "Open another Rusty Pythia workspace or AI window in a new browser tab.");

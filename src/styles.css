@@ -208,6 +208,11 @@ body::after {
   gap: 12px;
 }
 
+#maincontent {
+  width: 90%;
+  max-width: none;
+}
+
 .top-horizontal-scrollbar {
   position: fixed;
   top: 0;

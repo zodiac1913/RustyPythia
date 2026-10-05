@@ -28,7 +28,7 @@
         </div>
       </header>
 
-      <section class="workspace-shell">
+      <nav class="workspace-shell" role="navigation" aria-label="SQL Workspace">
         <div class="workspace-shell__main">
           <section class="launcher-card" aria-labelledby="workspace-title">
             <div class="workspace-shell__heading workspace-shell__heading--with-controls">
@@ -88,7 +88,7 @@
                 <sml-reactive-button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" 
                      title="Clear [F8] the editor and results" aria-label="Clear [F8] the editor and results" 
                      data-icon="bi bi-eraser" data-text="Clear [F8]"></sml-reactive-button>
-                <span class="launcher-actions__hint">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
+                <span class="launcher-actions__hint bg-Maroon text-Pink py-1 px-2">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
               </div>
             </form>
 
@@ -128,11 +128,11 @@
               </div>
             </div>
 
-            <p id="launcher-msg" aria-live="polite"></p>
-          </section>
+            <p id="launcher-msg" class="d-inline-flex px-2 py-1 text-Aquamarine bg-MidnightBlue rounded-4" aria-live="polite"></p>
+          </nav>
 
 
-          <section class="info-card info-card--inline" aria-labelledby="launch-tools-title">
+          <nav class="info-card info-card--inline" aria-labelledby="launch-tools-title" role="navigation" aria-label="Additional SQL Window Tools">
             <div class="launcher-form launcher-form--inline">
               <h2
                 id="launch-tools-title"
@@ -149,7 +149,8 @@
                   aria-haspopup="menu"
                   aria-expanded="false"
                   aria-controls="launch-menu"
-                  title="Open another Rusty Pythia workspace"
+                  title="Launch SQL App (open in a new window)"
+                  aria-label="Launch SQL App (open in a new window)"
                   data-icon="bi bi-window-plus"
                   data-text="Launch SQL App"
                 ></sml-reactive-button>
@@ -168,16 +169,17 @@
               <sml-reactive-button
                 type="button"
                 id="launch-help-button"
-                class="btn btn-sm btn-rusty launcher-help"
+                class="btn btn-sm btn-rusty launcher-help ps-1 ps-md-2"
                 title="What is this for?"
                 aria-label="What is Additional SQL Window for?"
                 data-icon="bi bi-question-circle"
                 data-icon-only="true"
                 data-text="What is Additional SQL Window for?"
               ></sml-reactive-button>
+            </nav>
               <p id="launch-msg" class="launch-msg" aria-live="polite"></p>
             </div>
-            <div class="mt-2">
+            <div class="">
               <sml-reactive-button type="button" id="app-log-button" class="btn btn-sm btn-rusty" aria-label="View application log" title="View application log and audit events" data-icon="bi bi-journal-text" data-text="View application log"></sml-reactive-button>
             </div>
           </section>
