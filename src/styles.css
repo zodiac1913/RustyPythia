@@ -159,6 +159,15 @@ body::after {
   --bs-btn-disabled-border-color: #8b4530;
 }
 
+/* This button has no .progress parent to supply Bootstrap's stripe variables. */
+#ai-send.progress-bar {
+  --bs-progress-height: 1rem;
+  --bs-progress-bar-color: var(--bs-btn-color);
+  --bs-progress-bar-bg: var(--bs-btn-bg);
+  --bs-progress-bar-transition: var(--bs-btn-transition);
+  flex-direction: row;
+}
+
 @media (prefers-color-scheme: dark) {
   .btn.btn-rusty,
   .btn.btn-rusty-primary {
@@ -602,6 +611,11 @@ body::after {
   min-width: 112px;
 }
 
+#convert-to-sql-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 #query-search-button,
 #app-log-button {
   white-space: nowrap;
@@ -923,6 +937,13 @@ body::after {
   gap: 12px;
 }
 
+.ai-result-entry__sql {
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .sql-results-output {
   padding: 18px;
   border: 1px solid rgba(177, 88, 61, 0.12);
@@ -1012,6 +1033,28 @@ body::after {
   overflow: auto;
 }
 
+.sql-results-column-mark-rail {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  height: 5px;
+}
+
+.sql-results-column-mark-rail__spacer {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: transparent;
+}
+
+.sql-results-table-wrap:focus-visible {
+  outline: 2px solid #ff3df2;
+  outline-offset: 2px;
+}
+
 /* WebKit hides overlay scrollbars until they are used, which makes the top
    bar undiscoverable. Force both tracks to stay visible. */
 .sql-results-scroll-top::-webkit-scrollbar,
@@ -1063,9 +1106,14 @@ body::after {
   border-left: 1px solid maroon;
 }
 
+.sql-results-table th:nth-child(2),
+.sql-results-table td:nth-child(2) {
+  border-left: 1px solid maroon;
+}
+
 .sql-results-table th {
   position: sticky;
-  top: 0;
+  top: 5px;
   z-index: 1;
   border-top: 1px solid maroon;
   font-size: 0.88rem;
@@ -1073,6 +1121,82 @@ body::after {
   text-transform: uppercase;
   background: midnightblue;
   color: powderblue;
+}
+
+.sql-results-table .sql-results-row-mark-header,
+.sql-results-table .sql-results-row-marker-cell {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 10px;
+  min-width: 10px;
+  max-width: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sql-results-table .sql-results-row-mark-header {
+  z-index: 3;
+}
+
+.sql-results-mark-button {
+  all: unset;
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  background: #858585;
+  cursor: pointer;
+}
+
+.sql-results-column-mark-rail .sql-results-mark-button--column {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 5px;
+}
+
+.sql-results-table .sql-results-mark-button--row {
+  position: absolute;
+  inset: 0 auto 0 2px;
+  width: 5px;
+}
+
+.sql-results-mark-button.is-marked {
+  background: #00d9ff;
+}
+
+.sql-results-mark-button:focus-visible {
+  outline: 2px solid #ff3df2;
+  outline-offset: 2px;
+  z-index: 4;
+}
+
+.sql-results-mark-button .bi {
+  position: absolute;
+  opacity: 0;
+  color: #00d9ff;
+  font-size: 0.7rem;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.sql-results-mark-button--column .bi {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.sql-results-mark-button--row .bi {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.sql-results-mark-button:hover .bi,
+.sql-results-mark-button:focus-visible .bi,
+.sql-results-mark-button.is-marked .bi {
+  opacity: 1;
 }
 
 .sql-results-table td {
@@ -1083,6 +1207,11 @@ body::after {
   /* Stops one long value from creating a mile-wide column. */
   max-width: 320px;
   background: blanchedalmond;
+}
+
+.sql-results-table .sql-results-row-marker-cell {
+  max-width: none;
+  background: transparent;
 }
 
 .launcher-actions {
@@ -1118,20 +1247,7 @@ body::after {
 }
 
 .launcher-actions__hint {
-  color: rgba(15, 15, 15, 0.78);
   font-size: 0.95rem;
-}
-
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 a {
@@ -1226,6 +1342,103 @@ button:focus-visible,
 sml-reactive-button:focus-visible {
   outline: 3px solid var(--accent-rust);
   outline-offset: 3px;
+}
+
+.ai-toolbar,
+.ai-toolbar__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-toolbar__controls .ai-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.ai-toolbar__controls .form-select-sm {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.25rem 2.25rem 0.25rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+.ai-toolbar__controls .btn-sm,
+.ai-toolbar__controls .ai-status {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+.ai-toolbar__controls .ai-status {
+  white-space: nowrap;
+}
+
+.ai-status__availability {
+  color: #a61b1b;
+}
+
+.ai-chat {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ai-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: clamp(18rem, 48vh, 36rem);
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid var(--accent-rust-border);
+  border-radius: 8px;
+}
+
+.ai-message {
+  flex-shrink: 0;
+  align-self: flex-start;
+  max-width: 90%;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(177, 88, 61, 0.1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-message--user {
+  align-self: flex-end;
+  background: rgba(177, 88, 61, 0.2);
+}
+
+.ai-message .sql-results-output {
+  white-space: normal;
+}
+
+.ai-sql {
+  margin-top: 16px;
+}
+
+.ai-sql__code {
+  max-height: 20rem;
+  overflow: auto;
+}
+
+#ai-sql-panel[hidden] {
+  display: none;
+}
+
+.ai-status[data-state="online"] .ai-status__availability,
+.ai-status[data-state="checking"][data-online="true"] .ai-status__availability {
+  color: #146c43;
 }
 
 .sql-memory-form {
@@ -1722,10 +1935,6 @@ sml-reactive-button:focus-visible {
   .preset-list__item.is-active {
     border-color: var(--accent-rust-border);
     box-shadow: inset 0 0 0 1px var(--accent-rust-wash);
-  }
-
-  .launcher-actions__hint {
-    color: rgba(246, 246, 246, 0.72);
   }
 
   .app-shell__eyebrow,

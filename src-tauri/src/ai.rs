@@ -78,6 +78,7 @@ fn query_term_aliases(token: &str) -> &'static [&'static str] {
         "current" => &["active", "currently", "notseparated", "notdeactivated", "stillemployed"],
         "currently" => &["current", "active", "notseparated", "notdeactivated"],
         "manager" => &["ismanager", "managerrole", "hasmanagerrole"],
+        "female" | "male" | "women" | "men" | "gender" => &["sex", "sexdescription"],
         _ => &[],
     }
 }
@@ -265,7 +266,12 @@ pub async fn slap_ollama() -> OllamaStatus {
         return current;
     }
 
-    let _ = wake_ollama();
+    if let Err(err) = wake_ollama() {
+        return OllamaStatus {
+            detail: Some(err),
+            ..current
+        };
+    }
     for _ in 0..8 {
         tokio::time::sleep(Duration::from_millis(700)).await;
         let status = ollama_status().await;
@@ -276,7 +282,7 @@ pub async fn slap_ollama() -> OllamaStatus {
 
     let mut status = ollama_status().await;
     if !status.online {
-        status.detail = Some("Slapped Ollama, but it did not wake. Start the Ollama app, then Refresh.".into());
+        status.detail = Some("Ollama did not respond after a start attempt. Start the Ollama app, then use Refresh Ollama.".into());
     }
     status
 }
@@ -1621,6 +1627,7 @@ fn sql_dialect_rules(connection_type: &str) -> Vec<&'static str> {
         "mssql" => vec![
             "Dialect rules: this is Microsoft SQL Server.",
             "Use SELECT TOP (n) for row limits. Never use LIMIT.",
+            "Use CAST(GETDATE() AS date) for today's date and GETDATE() or CURRENT_TIMESTAMP for the current date/time. Never use CURRENT_DATE in SQL Server.",
             "Use schema-qualified table names when available.",
             "Do not use PostgreSQL or SQLite-only syntax.",
         ],
@@ -1656,15 +1663,33 @@ struct SqlValidation {
     issues: Vec<String>,
 }
 
+/// Checks executable date keywords, excluding quoted values/identifiers and comments.
+fn uses_current_date_keyword(sql: &str) -> bool {
+    static TOKENS: OnceLock<Regex> = OnceLock::new();
+    let tokens = TOKENS.get_or_init(|| {
+        Regex::new(r#"(?is)'(?:''|[^'])*'|"(?:""|[^"])*"|\[(?:\]\]|[^\]])*\]|--[^\r\n]*|/\*.*?\*/|(?P<keyword>\bCURRENT_DATE\b)"#)
+            .expect("static date keyword regex is valid")
+    });
+    tokens.captures_iter(sql).any(|capture| capture.name("keyword").is_some())
+}
+
 fn validate_generated_sql(sql: &str, schema: &Schema, connection_type: &str, requested_columns: &[String]) -> SqlValidation {
     let referenced = extract_referenced_tables(sql);
     let mut issues = Vec::new();
     if !is_read_only_sql(sql) {
         issues.push("Only read-only SQL is allowed. Use SELECT/WITH/SHOW/DESCRIBE/PRAGMA and avoid write operations.".to_string());
     }
+    if connection_type == "mssql" {
+        if limit_re().is_match(sql) {
+            issues.push("SQL Server does not support LIMIT; use TOP instead.".into());
+        }
+        if uses_current_date_keyword(sql) {
+            issues.push("SQL Server does not support CURRENT_DATE; use CAST(GETDATE() AS date) for today's date.".into());
+        }
+    }
     if referenced.is_empty() {
         return SqlValidation {
-            valid: true,
+            valid: issues.is_empty(),
             unknown_tables: Vec::new(),
             issues,
         };
@@ -1685,10 +1710,6 @@ fn validate_generated_sql(sql: &str, schema: &Schema, connection_type: &str, req
         .filter(|table| !available.contains(&normalize_schema_identifier(table)))
         .cloned()
         .collect::<Vec<_>>();
-
-    if connection_type == "mssql" && limit_re().is_match(sql) {
-        issues.push("SQL Server does not support LIMIT; use TOP instead.".into());
-    }
 
     if !requested_columns.is_empty() && select_star_re().is_match(sql) {
         issues.push(format!(
@@ -2210,6 +2231,135 @@ enum Headcount {
     Former,
 }
 
+/// Recognizes only standalone name counts; extra filters stay with the model.
+/// Names are Unicode words, optionally quoted, with internal apostrophes/hyphens.
+fn employee_name_count_intent(conversation: &[ChatMessage]) -> Option<String> {
+    static_regex!(
+        name_count_re,
+        r#"(?i)^\s*(?:how many (?:employees|people) (?:are )?named|count (?:employees|people) named)\s+['"]?([\p{L}\p{M}]+(?:['’\-][\p{L}\p{M}]+)*)['"]?\s*[?.!]?\s*$"#
+    );
+    let latest = latest_user_message(conversation);
+    name_count_re().captures(&latest).map(|captures| captures[1].replace('’', "'"))
+}
+
+/// Builds database-side frequency rankings without sending employee names to
+/// Ollama. UNION counts a person once per category/name; ties prefer given names.
+fn employee_name_count_decision(schema: &Schema, name: &str) -> Option<AiDecision> {
+    let table = schema.iter().find(|entry| entry.name.eq_ignore_ascii_case("HR.HR_Employee"))?;
+    let identifier = find_column_name(&table.columns, "EmployeeIdentifier")?;
+    let first = find_column_name(&table.columns, "FirstName")?;
+    let middle = find_column_name(&table.columns, "MiddleName")?;
+    let last = find_column_name(&table.columns, "LastName")?;
+    let names = [(0, first), (0, middle), (1, last)]
+        .into_iter()
+        .map(|(category, column)| format!(
+            "SELECT {identifier} AS PersonKey, {category} AS Category, LOWER(LTRIM(RTRIM({column}))) AS MatchValue FROM {}",
+            table.name
+        ))
+        .collect::<Vec<_>>()
+        .join("\nUNION\n");
+    let literal = name.replace('\'', "''");
+    let sql = format!(
+        "SELECT COUNT(*) AS EmployeeCount
+FROM (
+{names}
+) AS Matches
+WHERE Matches.MatchValue = LOWER('{literal}')
+AND Matches.Category = (
+    SELECT CASE
+        WHEN COALESCE(SUM(CASE WHEN Category = 0 THEN Frequency ELSE 0 END), 0)
+          >= COALESCE(SUM(CASE WHEN Category = 1 THEN Frequency ELSE 0 END), 0)
+        THEN 0 ELSE 1 END
+    FROM (
+        SELECT Category, MatchValue, COUNT(*) AS Frequency,
+               DENSE_RANK() OVER (PARTITION BY Category ORDER BY COUNT(*) DESC) AS FrequencyRank
+        FROM (
+{names}
+        ) AS AllNames
+        WHERE MatchValue IS NOT NULL AND MatchValue <> ''
+        GROUP BY Category, MatchValue
+    ) AS RankedNames
+    WHERE MatchValue = LOWER('{literal}')
+);"
+    );
+    Some(AiDecision {
+        status: "ready".into(),
+        sql,
+        explanation: "Ranked all distinct employee first/middle names together and surnames separately by employee frequency. This count uses whichever category contains more employees with the requested name; ties prefer first/middle names. If one category has no match, the other is used. Each employee is counted once, with exact case-insensitive matching. NickName and manager/display names are excluded.".into(),
+        assumptions: vec!["Includes all employee records, current and former. Counts below the privacy threshold remain withheld.".into()],
+        model: "Rusty Pythia rule".into(),
+        ..AiDecision::default()
+    })
+}
+
+/// Recognizes simple sex headcounts without swallowing extra filters or historical requests.
+fn sex_headcount_intent(conversation: &[ChatMessage]) -> Option<(bool, bool)> {
+    let latest = conversation.iter().rev().find(|message| message.role == "user")?;
+    let pattern = regex(
+        r"(?i)^\s*(?:how|home) many (?:(?P<active>active|current) )?(?:(?P<before>female|male) employees(?: do we have)?|employees are (?P<after>female|male))\s*[?.]?\s*$",
+    );
+    let captures = pattern.captures(&latest.content)?;
+    let sex = captures.name("before").or_else(|| captures.name("after"))?;
+    Some((sex.as_str().eq_ignore_ascii_case("female"), captures.name("active").is_some()))
+}
+
+/// Uses the documented CATS F/M codes on the live employee table, preserving aggregate privacy checks at execution.
+fn sex_headcount_decision(schema: &Schema, female: bool, active: bool) -> Option<AiDecision> {
+    let table = schema.iter().find(|entry| entry.name.eq_ignore_ascii_case("HR.HR_Employee"))?;
+    let column = |wanted: &str| table.columns.iter().find(|column| column.eq_ignore_ascii_case(wanted)).cloned();
+    let sex = column("Sex")?;
+    let code = if female { "F" } else { "M" };
+    let label = if female { "Female" } else { "Male" };
+    let mut filter = format!("UPPER(LTRIM(RTRIM({sex}))) = '{code}'");
+    if active {
+        filter.push_str(&format!(" AND {} IS NULL AND {} IS NULL", column("SeparatedDate")?, column("DeactivateTimeStamp")?));
+    }
+    Some(AiDecision {
+        status: "ready".into(),
+        sql: format!("SELECT COUNT(*) AS {label}Employees FROM {} WHERE {filter};", table.name),
+        explanation: format!("Counts employees whose documented Sex code is {code} ({label})."),
+        assumptions: vec![
+            if active {
+                "Only current employees: both SeparatedDate and DeactivateTimeStamp are NULL.".into()
+            } else {
+                "Includes current and former employee records; no active-only filter was requested.".into()
+            },
+            "Unknown or missing Sex codes are excluded. Small counts remain subject to privacy suppression.".into(),
+        ],
+        model: "Rusty Pythia rule".into(),
+        ..AiDecision::default()
+    })
+}
+
+/// Recognizes only unfiltered current headcounts by home component; other requests stay with the model.
+fn component_headcount_intent(conversation: &[ChatMessage]) -> bool {
+    let Some(latest) = conversation.iter().rev().find(|message| message.role == "user") else {
+        return false;
+    };
+    regex(r"(?i)^\s*how many (?:active|current) employees are in each component\s*[?.]?\s*$")
+        .is_match(&latest.content)
+}
+
+/// Uses the live employee schema and departure fields; no grade-date proxy or component join is needed.
+fn component_headcount_decision(schema: &Schema) -> Option<AiDecision> {
+    let table = schema.iter().find(|entry| entry.name.eq_ignore_ascii_case("HR.HR_Employee"))?;
+    let column = |wanted: &str| table.columns.iter().find(|column| column.eq_ignore_ascii_case(wanted)).cloned();
+    let component = column("ComponentIdentifier")?;
+    let deactivated = column("DeactivateTimeStamp")?;
+    let separated = column("SeparatedDate")?;
+    Some(AiDecision {
+        status: "ready".into(),
+        sql: format!(
+            "SELECT {component}, COUNT(*) AS ActiveEmployees FROM {} WHERE {separated} IS NULL AND {deactivated} IS NULL GROUP BY {component} ORDER BY {component};",
+            table.name
+        ),
+        explanation: "Counts active employees by their home ComponentIdentifier. Active employees have both SeparatedDate and DeactivateTimeStamp null; grade dates do not determine employment status.".into(),
+        assumptions: vec!["Employees without a ComponentIdentifier are grouped together under NULL. Mixed departure-field anomalies are excluded. Small groups remain subject to privacy suppression.".into()],
+        model: "Rusty Pythia rule".into(),
+        ..AiDecision::default()
+    })
+}
+
 /// Plain headcount questions are answered from the approved rule, not the
 /// model. A small model misreads them, and the answer never changes shape.
 fn headcount_intent(conversation: &[ChatMessage]) -> Option<Headcount> {
@@ -2280,9 +2430,134 @@ fn headcount_decision(schema: &Schema, intent: Headcount) -> Option<AiDecision> 
     })
 }
 
+/// Maps a month name/abbreviation to its 1-based number, or a bare numeric
+/// month ("11", "2026-11") through the same lookup.
+fn month_number(token: &str) -> Option<u32> {
+    const MONTHS: &[(&str, u32)] = &[
+        ("january", 1), ("jan", 1), ("february", 2), ("feb", 2), ("march", 3), ("mar", 3),
+        ("april", 4), ("apr", 4), ("may", 5), ("june", 6), ("jun", 6), ("july", 7), ("jul", 7),
+        ("august", 8), ("aug", 8), ("september", 9), ("sep", 9), ("sept", 9), ("october", 10),
+        ("oct", 10), ("november", 11), ("nov", 11), ("december", 12), ("dec", 12),
+    ];
+    MONTHS.iter().find(|(name, _)| *name == token).map(|(_, number)| *number)
+}
+
+static_regex!(month_year_word_re, r"(?i)\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{4})\b");
+static_regex!(month_year_numeric_re, r"\b(\d{4})-(\d{1,2})\b|\b(\d{1,2})/(\d{4})\b");
+
+/// Finds a calendar month/year mentioned anywhere in the text, accepting a
+/// word month ("November 2026") or numeric forms ("2026-11", "11/2026").
+fn find_month_year(text: &str) -> Option<(i32, u32)> {
+    if let Some(captures) = month_year_word_re().captures(text) {
+        let month = month_number(&captures[1].to_lowercase())?;
+        let year = captures[2].parse().ok()?;
+        return Some((year, month));
+    }
+    if let Some(captures) = month_year_numeric_re().captures(text) {
+        if let (Some(year), Some(month)) = (captures.get(1), captures.get(2)) {
+            return Some((year.as_str().parse().ok()?, month.as_str().parse().ok()?));
+        }
+        if let (Some(month), Some(year)) = (captures.get(3), captures.get(4)) {
+            return Some((year.as_str().parse().ok()?, month.as_str().parse().ok()?));
+        }
+    }
+    None
+}
+
+/// "Eligible to retire" questions name a specific month/year and are answered
+/// from the approved rule for the same reason headcounts are: a small local
+/// model is unreliable at turning a month name into a date-range filter.
+fn retirement_eligibility_intent(conversation: &[ChatMessage]) -> Option<(i32, u32)> {
+    let latest = conversation.iter().rev().find(|message| message.role == "user")?;
+    let text = latest.content.to_lowercase();
+    if !regex(r"\b(eligible|eligibility)\b.*\bretir|\bretir\w*\b.*\b(eligible|eligibility)\b").is_match(&text) {
+        return None;
+    }
+    find_month_year(&text)
+}
+
+fn retirement_eligibility_decision(schema: &Schema, year: i32, month: u32) -> Option<AiDecision> {
+    use chrono::NaiveDate;
+
+    let table = schema.iter().find(|entry| entry.name.eq_ignore_ascii_case("HR.HR_Employee"))?;
+    let column = |wanted: &str| table.columns.iter().find(|column| column.eq_ignore_ascii_case(wanted)).cloned();
+    let eligibility = column("RetirementEligibilityDate")?;
+    let deactivated = column("DeactivateTimeStamp")?;
+    let separated = column("SeparatedDate")?;
+
+    let start = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let next_month_start = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)?
+    };
+    let end = next_month_start.pred_opt()?;
+
+    let filter = format!(
+        "{} BETWEEN '{}' AND '{}' AND {} IS NULL AND {} IS NULL",
+        eligibility,
+        start.format("%Y-%m-%d"),
+        end.format("%Y-%m-%d"),
+        deactivated,
+        separated
+    );
+
+    Some(AiDecision {
+        status: "ready".into(),
+        sql: format!("SELECT COUNT(*) AS RetirementEligibleCount FROM {} WHERE {};", table.name, filter),
+        explanation: format!(
+            "Current employees (no deactivation or separation date) whose RetirementEligibilityDate falls in {}.",
+            start.format("%B %Y")
+        ),
+        model: "Rusty Pythia rule".into(),
+        ..AiDecision::default()
+    })
+}
+
 pub(crate) async fn run_ai_assist(app: AppHandle, request: AiAssistRequest) -> Result<AiDecision, String> {
     let connection_id = normalize_connection_id(request.connection_id.as_deref()).to_string();
     let conversation = normalize_conversation(&request.conversation);
+    if let Some((female, active)) = sex_headcount_intent(&conversation) {
+        let (schema, _) = load_schema(&app, &connection_id).await?;
+        if let Some(decision) = sex_headcount_decision(&schema, female, active) {
+            crate::write_app_log(&app, "ai.assist", "Rule planned an employee sex headcount");
+            return Ok(decision);
+        }
+        return Ok(AiDecision::clarify(
+            "The supplied schema lacks the employee Sex field or departure fields needed for this count. Check the connection or re-probe its schema.",
+        ));
+    }
+    if let Some(name) = employee_name_count_intent(&conversation) {
+        let (schema, _) = load_schema(&app, &connection_id).await?;
+        if let Some(decision) = employee_name_count_decision(&schema, &name) {
+            crate::write_app_log(&app, "ai.assist", "Rule planned a frequency-ranked employee name count");
+            return Ok(decision);
+        }
+        return Ok(AiDecision::clarify(
+            "The approved employee table must provide EmployeeIdentifier, FirstName, MiddleName, and LastName for a frequency-ranked name count.",
+        ));
+    }
+    if let Some((year, month)) = retirement_eligibility_intent(&conversation) {
+        let (schema, _) = load_schema(&app, &connection_id).await?;
+        if let Some(decision) = retirement_eligibility_decision(&schema, year, month) {
+            crate::write_app_log(
+                &app,
+                "ai.assist",
+                &format!("Rule answered a retirement eligibility count for {}", connection_id),
+            );
+            return Ok(decision);
+        }
+    }
+    if component_headcount_intent(&conversation) {
+        let (schema, _) = load_schema(&app, &connection_id).await?;
+        if let Some(decision) = component_headcount_decision(&schema) {
+            crate::write_app_log(&app, "ai.assist", "Rule planned active employee counts by home component");
+            return Ok(decision);
+        }
+        return Ok(AiDecision::clarify(
+            "Active employee counts by component require ComponentIdentifier, SeparatedDate, and DeactivateTimeStamp on HR.HR_Employee.",
+        ));
+    }
     if let Some(intent) = headcount_intent(&conversation) {
         let (schema, _) = load_schema(&app, &connection_id).await?;
         if let Some(decision) = headcount_decision(&schema, intent) {
@@ -2365,7 +2640,7 @@ async fn ask_ollama_for_sql(
     .join("\n\n");
 
     let system_prompt = format!(
-        "{}\n\n========================\nSQL PLANNING CONTEXT\n========================\n{}",
+        "{}\n\n========================\nSQL PLANNING CONTEXT\n========================\n{}\n\n{}",
         STRICT_GLOBAL_PROMPT,
         build_ai_system_prompt(&PromptContext {
             connection_id,
@@ -2376,7 +2651,8 @@ async fn ask_ollama_for_sql(
             current_query,
             echelon_context: &echelon_context,
             docs_context,
-        })
+        }),
+        sql_dialect_rules(connection_type).join("\n")
     );
 
     crate::write_app_log(
@@ -2531,16 +2807,38 @@ pub async fn ai_execute_sql(
     app: AppHandle,
     connection_id: Option<String>,
     sql: String,
+    question: Option<String>,
+    answer: Option<String>,
 ) -> Result<SqlQueryResult, String> {
-    if !is_read_only_sql(&sql) {
-        return Err("The AI window can run read-only queries only.".into());
+    let connection_id = crate::normalize_connection_id(connection_id.as_deref()).to_string();
+    let connection = crate::open_workspace_database(&app)?;
+    crate::ensure_connection_exists(&connection, &connection_id)?;
+    let attempt = crate::begin_ai_sql_memory(&connection, &connection_id, &sql, question.as_deref(), answer.as_deref())?;
+    drop(connection);
+
+    let result = async {
+        if !is_read_only_sql(&sql) {
+            return Err("The AI window can run read-only queries only.".into());
+        }
+        let issues = crate::knowledge::statistic_issues(&app, &sql);
+        if !issues.is_empty() {
+            return Err(issues.join(" "));
+        }
+        let result = run_sql_query(app.clone(), Some(connection_id.clone()), sql.clone()).await?;
+        Ok(crate::knowledge::suppress_small_groups(result, &sql))
+    }.await;
+
+    let saved = crate::open_workspace_database(&app)
+        .and_then(|connection| crate::finish_ai_sql_memory(&connection, attempt, result.as_ref().err().map(String::as_str)));
+    if let Err(error) = saved {
+        let message = match &result {
+            Ok(_) => format!("SQL succeeded, but its AI audit outcome could not be saved: {error}"),
+            Err(query_error) => format!("{query_error} AI audit outcome could not be saved: {error}"),
+        };
+        crate::write_app_log(&app, "ai.audit.error", &message);
+        return Err(message);
     }
-    let issues = crate::knowledge::statistic_issues(&app, &sql);
-    if !issues.is_empty() {
-        return Err(issues.join(" "));
-    }
-    let result = run_sql_query(app, connection_id, sql.clone()).await?;
-    Ok(crate::knowledge::suppress_small_groups(result, &sql))
+    result
 }
 
 #[cfg(test)]
@@ -2549,6 +2847,219 @@ mod tests {
 
     fn user(text: &str) -> ChatMessage {
         ChatMessage { role: "user".into(), content: text.into() }
+    }
+
+    fn employee_name_schema() -> Schema {
+        vec![SchemaEntry {
+            name: "HR.HR_Employee".into(),
+            columns: ["EmployeeIdentifier", "FirstName", "MiddleName", "LastName", "NickName"]
+                .into_iter().map(str::to_string).collect(),
+            column_types: Vec::new(),
+            kind: "table".into(),
+            row_count: None,
+            primary_key: Vec::new(),
+            identity_key: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn sql_server_current_date_is_repaired_before_execution() {
+        let schema = employee_name_schema();
+        for sql in [
+            "SELECT CURRENT_DATE",
+            "SELECT current_date()",
+            "SELECT COUNT(*) FROM HR.HR_Employee WHERE BirthDate < CURRENT_DATE",
+        ] {
+            let validation = validate_generated_sql(sql, &schema, "mssql", &[]);
+            assert!(!validation.valid, "{sql}");
+            assert!(validation.issues.iter().any(|issue| issue.contains("CAST(GETDATE() AS date)")));
+        }
+        for sql in [
+            "SELECT CAST(GETDATE() AS date)",
+            "SELECT CURRENT_TIMESTAMP",
+            "SELECT 'CURRENT_DATE' AS Example",
+            "SELECT 'it''s CURRENT_DATE' AS Example",
+            "SELECT [CURRENT_DATE] FROM HR.HR_Employee",
+            "SELECT \"CURRENT_DATE\" FROM HR.HR_Employee",
+            "SELECT 1 -- CURRENT_DATE",
+            "SELECT /* CURRENT_DATE */ 1",
+        ] {
+            assert!(validate_generated_sql(sql, &schema, "mssql", &[]).valid, "{sql}");
+        }
+        for dialect in ["postgres", "sqlite"] {
+            assert!(validate_generated_sql("SELECT CURRENT_DATE", &schema, dialect, &[]).valid);
+        }
+        assert!(!validate_generated_sql("DELETE FROM HR.HR_Employee", &schema, "mssql", &[]).valid);
+        assert!(!validate_generated_sql("DELETE", &schema, "mssql", &[]).valid);
+        assert!(sql_dialect_rules("mssql").iter().any(|rule| rule.contains("Never use CURRENT_DATE")));
+    }
+
+    #[test]
+    fn name_count_intent_is_bounded_and_preserves_names() {
+        for (question, name) in [
+            ("How many employees are named John?", "John"),
+            ("count people named 'O’Neil'", "O'Neil"),
+            ("How many people named María-José?", "María-José"),
+        ] {
+            assert_eq!(employee_name_count_intent(&[user(question)]), Some(name.into()));
+        }
+        for question in [
+            "How many active employees are named John?",
+            "How many employees are named John in OIT?",
+            "How many employees are named John or Mary?",
+            "How many employees are named John'; DROP TABLE x; --",
+        ] {
+            assert_eq!(employee_name_count_intent(&[user(question)]), None);
+        }
+    }
+
+    #[test]
+    fn name_count_uses_ranked_categories_and_requires_real_fields() {
+        let mut schema = employee_name_schema();
+        let decision = employee_name_count_decision(&schema, "O'Neil").unwrap();
+        assert!(decision.sql.contains("LOWER('O''Neil')"));
+        assert!(decision.sql.contains("DENSE_RANK()"));
+        assert!(!decision.sql.contains("NickName"));
+        assert!(is_read_only_sql(&decision.sql));
+        assert_eq!(select_clause_for_privacy(&decision.sql), "COUNT(*) AS EmployeeCount");
+        assert!(validate_restricted_pii_projection(&decision.sql).is_empty());
+        schema[0].columns.retain(|column| column != "MiddleName");
+        assert!(employee_name_count_decision(&schema, "John").is_none());
+    }
+
+    #[test]
+    fn name_count_ranking_selects_frequency_fallback_and_deduplicates() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "ATTACH DATABASE ':memory:' AS HR;
+             CREATE TABLE HR.HR_Employee (
+                 EmployeeIdentifier INTEGER PRIMARY KEY,
+                 FirstName TEXT, MiddleName TEXT, LastName TEXT, NickName TEXT
+             );"
+        ).unwrap();
+        for (id, first, middle, last, nickname) in [
+            (1, "John", "John", "Smith", ""),
+            (2, "Mary", " john ", "Smith", ""),
+            (3, "Alex", "", "John", ""),
+            (4, "Smith", "", "Smith", ""),
+            (5, "Alex", "", "SurnameOnly", "John"),
+            (6, "GivenOnly", "", "Other", ""),
+            (7, "Tie", "", "Else", ""),
+            (8, "Else", "", "Tie", ""),
+            (9, "O'Neil", "", "Else", ""),
+        ] {
+            db.execute(
+                "INSERT INTO HR.HR_Employee VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, first, middle, last, nickname],
+            ).unwrap();
+        }
+        for (name, expected) in [
+            ("John", 2), ("Smith", 3), ("SurnameOnly", 1), ("GivenOnly", 1),
+            ("Tie", 1), ("O'Neil", 1), ("Absent", 0),
+        ] {
+            let decision = employee_name_count_decision(&employee_name_schema(), name).unwrap();
+            let count: i64 = db.query_row(&decision.sql, [], |row| row.get(0)).unwrap();
+            assert_eq!(count, expected, "{name}");
+        }
+        // Tie chooses given names, not the surname category or their union.
+        db.execute("UPDATE HR.HR_Employee SET FirstName = 'Else', MiddleName = 'Tie' WHERE EmployeeIdentifier = 7", []).unwrap();
+        let decision = employee_name_count_decision(&employee_name_schema(), "Tie").unwrap();
+        assert_eq!(db.query_row::<i64, _, _>(&decision.sql, [], |row| row.get(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn sex_counts_bypass_model_and_preserve_scope() {
+        for question in [
+            "How many female employees do we have?",
+            "How many employees are female?",
+            "Home many employees are female?",
+        ] {
+            assert_eq!(sex_headcount_intent(&[user(question)]), Some((true, false)));
+        }
+        assert_eq!(sex_headcount_intent(&[user("How many male employees do we have?")]), Some((false, false)));
+        assert_eq!(sex_headcount_intent(&[user("How many active employees are male?")]), Some((false, true)));
+        for question in [
+            "How many female employees do we have in OIT?",
+            "How many former female employees do we have?",
+            "How many employees are female and over 55?",
+        ] {
+            assert_eq!(sex_headcount_intent(&[user(question)]), None);
+        }
+        let mut schema = employee_name_schema();
+        schema[0].columns.extend(["Sex", "SeparatedDate", "DeactivateTimeStamp"].into_iter().map(str::to_string));
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "ATTACH DATABASE ':memory:' AS HR;
+             CREATE TABLE HR.HR_Employee(Sex TEXT, SeparatedDate TEXT, DeactivateTimeStamp TEXT);
+             INSERT INTO HR.HR_Employee VALUES
+             ('F', NULL, NULL), (' f ', '2025-01-01', NULL),
+             ('M', NULL, NULL), ('m', NULL, '2025-01-01'),
+             (NULL, NULL, NULL), ('Unknown', NULL, NULL);"
+        ).unwrap();
+        for (female, active, expected) in [(true, false, 2), (false, false, 2), (true, true, 1), (false, true, 1)] {
+            let decision = sex_headcount_decision(&schema, female, active).unwrap();
+            assert!(validate_generated_sql(&decision.sql, &schema, "mssql", &[]).valid);
+            assert!(validate_restricted_pii_projection(&decision.sql).is_empty());
+            assert_eq!(db.query_row::<i64, _, _>(&decision.sql, [], |row| row.get(0)).unwrap(), expected);
+            assert!(!decision.sql.contains("History"));
+            assert!(!decision.sql.contains("BirthDate"));
+        }
+        schema[0].columns.retain(|column| column != "DeactivateTimeStamp");
+        assert!(sex_headcount_decision(&schema, true, true).is_none());
+        assert!(sex_headcount_decision(&schema, true, false).is_some());
+        schema[0].columns.retain(|column| column != "Sex");
+        assert!(sex_headcount_decision(&schema, true, false).is_none());
+    }
+
+    #[test]
+    fn sex_demographic_words_reveal_employee_sex_fields() {
+        let columns = ["EmployeeIdentifier", "Sex", "SexDescription", "BirthDate"]
+            .into_iter().map(str::to_string).collect::<Vec<_>>();
+        for word in ["female", "male", "women", "men", "gender"] {
+            let tokens = expand_search_tokens(&[word.into()]);
+            let selected = select_relevant_columns(&columns, &tokens, &[], false, &[], false);
+            assert!(selected.contains(&"Sex".into()), "{word}");
+            assert!(selected.contains(&"SexDescription".into()), "{word}");
+            assert!(!selected.contains(&"BirthDate".into()), "{word}");
+        }
+    }
+
+    #[test]
+    fn active_component_counts_use_departure_fields() {
+        assert!(component_headcount_intent(&[user("How many active employees are in each component?")]));
+        assert!(component_headcount_intent(&[user("How many current employees are in each component?")]));
+        for question in [
+            "How many active employees are in each component in 2025?",
+            "How many active employees are in each component with grade 12?",
+            "How many former employees are in each component?",
+        ] {
+            assert!(!component_headcount_intent(&[user(question)]));
+        }
+        let mut schema = employee_name_schema();
+        schema[0].columns.extend(
+            ["ComponentIdentifier", "SeparatedDate", "DeactivateTimeStamp"].into_iter().map(str::to_string)
+        );
+        let decision = component_headcount_decision(&schema).unwrap();
+        assert!(validate_generated_sql(&decision.sql, &schema, "mssql", &[]).valid);
+        assert!(!decision.sql.contains("CURRENT_DATE"));
+        assert!(!decision.sql.contains("Grade"));
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "ATTACH DATABASE ':memory:' AS HR;
+             CREATE TABLE HR.HR_Employee (ComponentIdentifier INTEGER, SeparatedDate TEXT, DeactivateTimeStamp TEXT);
+             INSERT INTO HR.HR_Employee VALUES
+             (1, NULL, NULL), (1, NULL, NULL), (2, NULL, NULL), (NULL, NULL, NULL),
+             (1, '2025-01-01', NULL), (1, NULL, '2025-01-01'), (2, '2025-01-01', '2025-01-01');"
+        ).unwrap();
+        let mut statement = db.prepare(&decision.sql).unwrap();
+        let counts = statement.query_map([], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)))
+            .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(counts, vec![(None, 1), (Some(1), 2), (Some(2), 1)]);
+        for required in ["ComponentIdentifier", "SeparatedDate", "DeactivateTimeStamp"] {
+            let mut missing = schema.clone();
+            missing[0].columns.retain(|column| column != required);
+            assert!(component_headcount_decision(&missing).is_none());
+        }
     }
 
     #[test]
@@ -2562,6 +3073,24 @@ mod tests {
             Some(Headcount::Former)
         );
         assert_eq!(headcount_intent(&[user("how many active employees are in each component?")]), None);
+    }
+
+    #[test]
+    fn retirement_eligibility_intent_parses_month_and_year() {
+        assert_eq!(
+            retirement_eligibility_intent(&[user("Can you tell me how many employees are eligible to retire in November 2026")]),
+            Some((2026, 11))
+        );
+        assert_eq!(
+            retirement_eligibility_intent(&[user("how many are retirement eligible in 2026-11")]),
+            Some((2026, 11))
+        );
+        assert_eq!(
+            retirement_eligibility_intent(&[user("how many are retirement eligible in 11/2026")]),
+            Some((2026, 11))
+        );
+        assert_eq!(retirement_eligibility_intent(&[user("how many employees do we have")]), None);
+        assert_eq!(retirement_eligibility_intent(&[user("who is eligible to retire")]), None);
     }
 
     #[test]

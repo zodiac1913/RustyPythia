@@ -28,16 +28,13 @@
         </div>
       </header>
 
-      <section class="launcher-card ai-card" aria-labelledby="ai-workspace-title">
+      <section class="launcher-card ai-card" aria-label="Ask The Oracle">
         <div class="ai-toolbar">
-          <div class="ai-toolbar__intro">
-            <h2 id="ai-workspace-title">Ask The Oracle</h2>
-            <p class="-ai-toolbar__note text-navy">
-              Describe what you want in plain English. The Oracle reads the selected database's schema and
-              documentation, asks when something is unclear, then writes and runs read-only SQL.
-            </p>
-          </div>
           <div class="ai-toolbar__controls">
+            <div class="form-check form-switch mb-0">
+              <input id="ai-show-sql" class="form-check-input" type="checkbox" role="switch" aria-controls="ai-sql-panel" />
+              <label class="form-check-label" for="ai-show-sql">Show SQL</label>
+            </div>
             <label class="ai-field d-none" for="ai-connection">
               <span class="">Database</span>
               <select id="ai-connection" class="form-select form-select-sm" title="Database the Oracle queries"></select>
@@ -46,26 +43,25 @@
               <span>Model</span>
               <select id="ai-model" class="form-select form-select-sm" title="Local Ollama model" aria-label="Local Ollama model"></select>
             </label>
-            <sml-reactive-button type="button" id="ai-refresh-status" class="btn btn-sm btn-rusty" title="Ollama Refresh gain" aria-label="Ollama Refresh again" data-icon="bi bi-arrow-clockwise" data-text="Ollama Refresh"></sml-reactive-button>
-            <sml-reactive-button type="button" id="ai-slap-ollama" class="btn btn-sm btn-rusty" title="Slap Ollama if it is asleep" aria-label="Slap Ollama if it is asleep" data-icon="bi bi-lightning-charge" data-text="Slap Ollama"></sml-reactive-button>
+            <sml-reactive-button type="button" id="ai-refresh-status" class="btn btn-sm btn-rusty" title="Check Ollama and try to start it if unavailable" aria-label="Check Ollama and try to start it if unavailable" data-icon="bi bi-arrow-clockwise" data-text="Refresh Ollama"></sml-reactive-button>
             <sml-reactive-button
               type="button"
               id="ai-reprobe"
               class="btn btn-sm btn-rusty"
-              title="Re-probe db's tables, columns, keys and relationships"
-              aria-label="Re-probe db's tables, columns, keys and relationships"
+              title="Re-probe db via a refresh of the live database schema cache; does not change Markdown instructions"
+              aria-label="Re-probe db via a refresh of the live database schema cache; does not change Markdown instructions"
               data-icon="bi bi-diagram-3"
               data-text="Re-probe db"
             ></sml-reactive-button>
+            <output id="ai-status" class="ai-status" data-state="checking" aria-live="polite" title="Checking Ollama status...">Ollama <span class="ai-status__availability">Offline</span></output>
           </div>
         </div>
 
-        <output id="ai-status" class="ai-status" data-state="checking" aria-live="polite">Checking Ollama status...</output>
-
         <div class="ai-layout">
           <nav class="ai-chat" aria-labelledby="ai-chat-title" aria-label="Ask The Oracle">
-            <h3 id="ai-chat-title" class="ai-section-title">Conversation</h3>
-            <div id="ai-conversation" class="ai-conversation" aria-live="polite" aria-label="AI conversation"></div>
+            <h3 id="ai-chat-title" class="ai-section-title">Ask the Oracle</h3>
+            <p>The Oracle uses CATS System data to answer your queries.</p>
+            <div id="ai-conversation" class="ai-conversation" role="log" aria-live="polite" aria-label="AI conversation" tabindex="0"></div>
 
             <div id="ai-progress" class="ai-progress" role="status" hidden>
               <span class="ai-progress__label" id="ai-progress-label">The Oracle is working...</span>
@@ -84,38 +80,24 @@
               <div class="ai-compose__actions">
                 <span id="ai-compose-hint" class="ai-compose__hint">Enter sends · Shift+Enter adds a line</span>
                 <div class="ai-compose__buttons">
-                  <sml-reactive-button type="button" id="ai-clear" class="btn btn-sm btn-rusty" title="Clear the conversation" aria-label="Clear the conversation" data-icon="bi bi-eraser" data-text="Clear"></sml-reactive-button>
+                  <sml-reactive-button type="button" id="ai-clear" class="btn btn-sm btn-rusty" title="Clear the conversation and result history" aria-label="Clear the conversation and result history" data-icon="bi bi-eraser" data-text="Clear"></sml-reactive-button>
                   <sml-reactive-button type="button" id="ai-send" class="btn btn-sm btn-rusty-primary" title="Ask The Oracle" aria-label="Ask The Oracle" data-icon="bi bi-send" data-text="Ask The Oracle"></sml-reactive-button>
                 </div>
               </div>
             </form>
           </nav>
 
-          <nav class="ai-sql" aria-labelledby="ai-sql-title" aria-label="Generated SQL">
-            <div class="ai-sql__header">
-              <h3 id="ai-sql-title" class="ai-section-title">Generated SQL</h3>
-              <div class="ai-sql__buttons">
-                <sml-reactive-button type="button" id="ai-copy-sql" class="btn btn-sm btn-rusty" title="Copy generated SQL" aria-label="Copy generated SQL" data-icon="bi bi-clipboard" data-text="Copy"></sml-reactive-button>
-                <sml-reactive-button type="button" id="ai-rerun-sql" class="btn btn-sm btn-rusty" title="Run again the generated SQL" aria-label="Run again the generated SQL" data-icon="bi bi-play-fill" data-text="Run again"></sml-reactive-button>
-              </div>
-            </div>
+          <nav id="ai-sql-panel" class="ai-sql" aria-labelledby="ai-sql-title" aria-label="Generated SQL" hidden>
+            <h3 id="ai-sql-title" class="ai-section-title">Generated SQL</h3>
             <pre id="ai-sql" class="ai-sql__code" tabindex="0" aria-label="SQL generated by the Oracle"><span class="ai-sql__empty">The SQL the Oracle writes will appear here.</span></pre>
-            <div id="ai-sql-notes" class="ai-sql__notes" hidden></div>
-          </section>
+            <div class="ai-sql__buttons">
+              <sml-reactive-button type="button" id="ai-copy-sql" class="btn btn-sm btn-rusty" title="Copy generated SQL" aria-label="Copy generated SQL" data-icon="bi bi-clipboard" data-text="Copy"></sml-reactive-button>
+              <sml-reactive-button type="button" id="ai-rerun-sql" class="btn btn-sm btn-rusty" title="Run again the generated SQL" aria-label="Run again the generated SQL" data-icon="bi bi-play-fill" data-text="Run again"></sml-reactive-button>
+            </div>
+          </nav>
         </div>
       </section>
 
-      <section class="launcher-card sql-results-card ai-results" aria-labelledby="ai-results-title">
-        <div class="sql-results-card__title-row">
-          <h3 id="ai-results-title">Results</h3>
-        </div>
-        <p id="ai-results-status" class="ai-results__status" aria-live="polite">Ask a question to see results here.</p>
-        <div class="sql-results-surface">
-          <div id="ai-results-output" class="sql-results-output">
-            <p class="sql-results-output__empty">Results from the generated SQL will appear here.</p>
-          </div>
-        </div>
-      </section>
     </main>
   </body>
 </html>

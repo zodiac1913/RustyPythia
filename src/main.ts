@@ -52,6 +52,7 @@ let launcherMsgEl: HTMLElement | null;
 let openTauriButtonEl: HTMLButtonElement | null;
 let openBrowserButtonEl: HTMLButtonElement | null;
 let openAiButtonEl: HTMLButtonElement | null;
+let openBrowserAiButtonEl: HTMLButtonElement | null;
 let launchMenuButtonEl: HTMLElement | null;
 let launchMenuEl: HTMLElement | null;
 let launchMsgEl: HTMLElement | null;
@@ -62,6 +63,7 @@ let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
+let convertToSqlButtonEl: HTMLButtonElement | null;
 let queryLanguageEl: HTMLSelectElement | null;
 let querySearchButtonEl: HTMLElement | null;
 let appLogButtonEl: HTMLElement | null;
@@ -245,6 +247,16 @@ const QUERY_KEYWORDS: Record<QueryLanguage, SQuerrlSuggestion[]> = {
 
 const SQL_PREFIX_PATTERN = /^\s*(select|with|insert|update|delete|drop|create|alter|pragma|explain)\b/i;
 const SQUERRL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+const SQL_RESERVED_IDENTIFIERS = new Set([
+  "all", "alter", "and", "any", "as", "asc", "between", "by", "case", "check", "column",
+  "constraint", "create", "current_date", "current_time", "current_timestamp", "database",
+  "default", "delete", "desc", "distinct", "drop", "else", "end", "exists", "false", "from",
+  "full", "group", "having", "in", "index", "inner", "insert", "intersect", "into", "is",
+  "join", "left", "like", "not", "null", "offset", "on", "or", "order", "outer", "over",
+  "partition", "primary", "references", "right", "row", "rows", "schema", "select", "set",
+  "table", "then", "top", "true", "union", "unique", "update", "user", "values", "when",
+  "where", "with",
+]);
 // Table names may carry an optional schema prefix so MSSQL targets like
 // XO.XO_ExecutiveOfficer parse the same as unqualified SQLite tables.
 const SQUERRL_TABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$/;
@@ -254,8 +266,6 @@ const INTERNAL_CONNECTION_ID = "__internal_workspace__";
 const EDIT_CONNECTION_ACTION = "__edit_connection__";
 const ADD_CONNECTION_ACTION = "__add_connection__";
 const DELETE_CONNECTION_ACTION = "__delete_connection__";
-// Above this many suggestions the picker opens focused on its filter box.
-const SQUERRL_SEARCH_FOCUS_THRESHOLD = 15;
 const PRESET_STORAGE_KEY = "rusty-pythia.connection-presets";
 const ACTIVE_PRESET_STORAGE_KEY = "rusty-pythia.active-preset";
 const BROWSER_WORKSPACE_DB_KEY = "rusty-pythia.browser-workspace.sqlite";
@@ -398,6 +408,41 @@ function initializeBrowserWorkspaceDb(database: BrowserSqlDatabase) {
       PRIMARY KEY(connection_id, statement)
     );
   `);
+  const hasSource = getBrowserSqlRows(database, "PRAGMA table_info(sql_statement_memory)")
+    .some((column) => column.name === "source");
+  if (!hasSource) {
+    database.run("BEGIN");
+    try {
+      database.run(`
+        CREATE TABLE sql_statement_memory_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          connection_id TEXT NOT NULL,
+          statement TEXT NOT NULL,
+          squerrl_statement TEXT,
+          source TEXT NOT NULL DEFAULT 'sql' CHECK(source IN ('sql', 'AI')),
+          question TEXT,
+          answer TEXT,
+          passfail TEXT CHECK(passfail IN ('pass', 'fail')),
+          error_message TEXT,
+          first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          execution_count INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO sql_statement_memory_audit
+          (connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count)
+        SELECT connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count
+        FROM sql_statement_memory;
+        DROP TABLE sql_statement_memory;
+        ALTER TABLE sql_statement_memory_audit RENAME TO sql_statement_memory;
+        CREATE UNIQUE INDEX sql_statement_memory_recall
+          ON sql_statement_memory(connection_id, statement) WHERE source = 'sql';
+      `);
+      database.run("COMMIT");
+    } catch (error) {
+      database.run("ROLLBACK");
+      throw error;
+    }
+  }
 }
 
 function syncBrowserConnectionCatalog(database: BrowserSqlDatabase, store: PresetStore) {
@@ -597,6 +642,7 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
           SELECT connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count
           FROM sql_statement_memory
           WHERE connection_id = ?
+            AND source = 'sql'
           ORDER BY last_seen_at DESC, statement COLLATE NOCASE ASC
           LIMIT ?
         `,
@@ -628,6 +674,7 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
           FROM sql_statement_memory
           WHERE connection_id = ?
             AND statement = ?
+            AND source = 'sql'
           LIMIT 1
         `,
         [connectionId, statement]
@@ -657,7 +704,7 @@ async function browserInvoke<T>(command: string, args?: Record<string, unknown>)
             execution_count
           )
           VALUES (?, ?, ?, ?, ?, 1)
-          ON CONFLICT(connection_id, statement) DO UPDATE SET
+          ON CONFLICT(connection_id, statement) WHERE source = 'sql' DO UPDATE SET
             last_seen_at = excluded.last_seen_at,
             execution_count = sql_statement_memory.execution_count + 1,
             squerrl_statement = CASE
@@ -842,6 +889,11 @@ async function recordAppEvent(kind: string, message: string) {
 }
 
 function quoteSqlIdentifier(identifier: string) {
+  const unquotedIdentifier = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+  // Keep ordinary names readable; quote names that need protection as SQL syntax.
+  if (unquotedIdentifier.test(identifier) && !SQL_RESERVED_IDENTIFIERS.has(identifier.toLowerCase())) {
+    return identifier;
+  }
   return `"${identifier.replace(/"/g, '""')}"`;
 }
 
@@ -1209,17 +1261,38 @@ function renderSqlResults(result: SqlQueryResult | null) {
   }
 
   const header = result.columns
-    .map((column) => `<th>${escapeHtml(column)}</th>`)
+    .map((column) => `<th><span>${escapeHtml(column)}</span></th>`)
+    .join("");
+  const columnMarkRail = result.columns
+    .map((column, columnIndex) => `
+      <button
+        type="button"
+        class="sql-results-mark-button sql-results-mark-button--column"
+        data-mark-column="${columnIndex}"
+        aria-label="Mark column ${escapeHtml(column)}"
+        aria-pressed="false"
+        tabindex="-1"
+        title="Mark column: ${escapeHtml(column)}"
+      ><i class="bi bi-bookmark-fill" aria-hidden="true"></i></button>
+    `)
     .join("");
 
   sqlResultsOutputEl.innerHTML = `
     <div class="sql-results-scroll-top" aria-hidden="true">
       <div class="sql-results-scroll-top__spacer"></div>
     </div>
-    <div class="sql-results-table-wrap">
+    <div class="sql-results-table-wrap" role="region" tabindex="0" aria-label="Query results. Use Shift plus an arrow key to cycle marked rows and columns.">
+      <div class="sql-results-column-mark-rail" aria-label="Column marks">
+        <span class="sql-results-column-mark-rail__spacer" aria-hidden="true"></span>
+        ${columnMarkRail}
+      </div>
       <table class="sql-results-table">
+        <caption class="visually-hidden">Query results. Toggle row or column bookmarks, then use Shift plus an arrow key to cycle between marked items.</caption>
         <thead>
-          <tr>${header}</tr>
+          <tr class="sql-results-header-row">
+            <th class="sql-results-row-mark-header" aria-hidden="true"></th>
+            ${header}
+          </tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -1250,7 +1323,26 @@ async function fillSqlResultRows(result: SqlQueryResult) {
     body.insertAdjacentHTML(
       "beforeend",
       slice
-        .map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`)
+        .map((row, rowOffset) => {
+          const rowIndex = start + rowOffset;
+          const cells = row.map((value) => `<td tabindex="-1">${escapeHtml(value)}</td>`).join("");
+          return `
+            <tr>
+              <td class="sql-results-row-marker-cell">
+                <button
+                  type="button"
+                  class="sql-results-mark-button sql-results-mark-button--row"
+                  data-mark-row="${rowIndex}"
+                  aria-label="Mark result row ${rowIndex + 1}"
+                  aria-pressed="false"
+                  tabindex="-1"
+                  title="Mark result row ${rowIndex + 1}"
+                ><i class="bi bi-bookmark-fill" aria-hidden="true"></i></button>
+              </td>
+              ${cells}
+            </tr>
+          `;
+        })
         .join("")
     );
 
@@ -1379,12 +1471,17 @@ function wireSqlResultsScrollSync() {
   const spacer = topBar?.querySelector<HTMLElement>(".sql-results-scroll-top__spacer");
   const wrap = sqlResultsOutputEl?.querySelector<HTMLElement>(".sql-results-table-wrap");
   const table = wrap?.querySelector<HTMLElement>(".sql-results-table");
-  if (!topBar || !spacer || !wrap || !table) {
+  const markRail = wrap?.querySelector<HTMLElement>(".sql-results-column-mark-rail");
+  if (!topBar || !spacer || !wrap || !table || !markRail) {
     return;
   }
 
   const syncWidth = () => {
     spacer.style.width = `${table.scrollWidth}px`;
+    const headerCells = Array.from(table.querySelectorAll<HTMLElement>(".sql-results-header-row > th"));
+    markRail.style.gridTemplateColumns = headerCells
+      .map((cell) => `${cell.getBoundingClientRect().width}px`)
+      .join(" ");
     // An empty track above a table that already fits is just clutter.
     topBar.hidden = table.scrollWidth <= wrap.clientWidth;
   };
@@ -1404,6 +1501,63 @@ function wireSqlResultsScrollSync() {
 
   link(topBar, wrap);
   link(wrap, topBar);
+}
+
+function wireSqlResultMarkControls() {
+  sqlResultsOutputEl?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const button = target.closest<HTMLButtonElement>(".sql-results-mark-button");
+    if (!button) {
+      return;
+    }
+
+    const isMarked = button.getAttribute("aria-pressed") !== "true";
+    const labelSubject = (button.getAttribute("aria-label") ?? "result item")
+      .replace(/^(?:un)?mark\s+/i, "");
+    button.setAttribute("aria-pressed", String(isMarked));
+    button.setAttribute("aria-label", `${isMarked ? "Unmark" : "Mark"} ${labelSubject}`);
+    button.classList.toggle("is-marked", isMarked);
+    button.title = button.getAttribute("aria-label") ?? "";
+  });
+
+  sqlResultsOutputEl?.addEventListener("keydown", (event) => {
+    if (!event.shiftKey || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+      return;
+    }
+
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".sql-results-table-wrap")) {
+      return;
+    }
+
+    const markAttribute = event.key === "ArrowUp" || event.key === "ArrowDown"
+      ? "data-mark-row"
+      : "data-mark-column";
+    const markedButtons = Array.from(
+      sqlResultsOutputEl?.querySelectorAll<HTMLButtonElement>(
+        `.sql-results-mark-button[${markAttribute}][aria-pressed="true"]`
+      ) ?? []
+    );
+    if (!markedButtons.length) {
+      return;
+    }
+
+    const direction = event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 1;
+    const currentIndex = markedButtons.indexOf(document.activeElement as HTMLButtonElement);
+    let nextIndex: number;
+    if (currentIndex < 0) {
+      nextIndex = direction > 0 ? 0 : markedButtons.length - 1;
+    } else {
+      nextIndex = (currentIndex + direction + markedButtons.length) % markedButtons.length;
+    }
+
+    event.preventDefault();
+    markedButtons[nextIndex].focus();
+  });
 }
 
 function openConnectionModal() {
@@ -1852,20 +2006,55 @@ function getSQuerrlContext() {
   }
 
   const cursor = sqlEditorEl.selectionStart;
+  const selectionEnd = sqlEditorEl.selectionEnd;
   const beforeCursor = sqlEditorEl.value.slice(0, cursor);
+  const afterCursor = sqlEditorEl.value.slice(selectionEnd);
+  const queryText = sqlEditorEl.value;
+  const language = getEffectiveQueryLanguage();
   const tokenMatch = /[A-Za-z_][A-Za-z0-9_$]*$/.exec(beforeCursor);
-  const prefix = tokenMatch?.[0] ?? "";
+  const tokenSuffixMatch = /^[A-Za-z0-9_$]+/.exec(afterCursor);
+  const endsAfterTableReference = language === "sql" &&
+    parseSqlTableReferences(beforeCursor).some((reference) => reference.end === beforeCursor.length);
+  const prefix = endsAfterTableReference ? "" : tokenMatch?.[0] ?? "";
+  const replaceEnd = selectionEnd + (endsAfterTableReference ? 0 : tokenSuffixMatch?.[0].length ?? 0);
   const beforeToken = beforeCursor.slice(0, beforeCursor.length - prefix.length);
   const normalized = beforeToken.toLowerCase();
   const fromMatch = /\bfrom\s+([a-z_][a-z0-9$]*)?$/.exec(normalized);
   const hasFrom = /\bfrom\b/i.test(beforeCursor);
+  const hasFromInQuery = /\bfrom\b/i.test(queryText);
   const hasClause = /\b(where|order\s+by)\b/i.test(beforeCursor);
+  const hasClauseAfterCursor = /\b(where|order\s+by)\b/i.test(afterCursor);
+  const hasWhereInQuery = /\bwhere\b/i.test(queryText);
+  const hasOrderByInQuery = /\border\s+by\b/i.test(queryText);
   // A trailing comma means another field is expected, so it reopens the picker
   // just like whitespace does.
   const trigger = Boolean(prefix) || /[\s,]$/.test(beforeCursor);
-  const language = getEffectiveQueryLanguage();
 
-  return { cursor, beforeCursor, beforeToken, prefix, fromMatch, hasFrom, hasClause, trigger, language };
+  return {
+    cursor, replaceEnd, beforeCursor, afterCursor, queryText, beforeToken, prefix, fromMatch,
+    hasFrom, hasFromInQuery, hasClause, hasClauseAfterCursor,
+    hasWhereInQuery, hasOrderByInQuery, trigger, language,
+  };
+}
+
+const SQL_TABLE_IDENTIFIER_PATTERN = String.raw`(?:"(?:[^"]|"")*"|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)`;
+const SQL_TABLE_REFERENCE_PATTERN = new RegExp(
+  String.raw`\b(?:from|join)\s+(${SQL_TABLE_IDENTIFIER_PATTERN}(?:\s*\.\s*${SQL_TABLE_IDENTIFIER_PATTERN})?)`,
+  "gi"
+);
+
+// SQL Assist allows quoted and schema-qualified FROM/JOIN targets.
+function parseSqlTableReferences(statement: string) {
+  const references: Array<{ name: string; end: number }> = [];
+  for (const match of statement.matchAll(SQL_TABLE_REFERENCE_PATTERN)) {
+    const rawName = match[1];
+    const name = rawName
+      .split(".")
+      .map((part) => part.trim().replace(/^"((?:[^"]|"")*)"$/, "$1").replace(/""/g, '"').replace(/^\[([^\]]+)\]$/, "$1"))
+      .join(".");
+    references.push({ name, end: (match.index ?? 0) + match[0].length });
+  }
+  return references;
 }
 
 // Works out which part of a SQuerL statement the user is on purely from the
@@ -1918,6 +2107,9 @@ function setEditorLanguage(language: QueryLanguage) {
 
   if (queryLanguageEl) {
     queryLanguageEl.value = language;
+  }
+  if (convertToSqlButtonEl) {
+    convertToSqlButtonEl.hidden = language !== "squerrl";
   }
 
   const modeBadge = document.querySelector<HTMLElement>("#editor-mode-badge");
@@ -1978,7 +2170,7 @@ function selectSQuerrlSuggestion(suggestion: SQuerrlSuggestion) {
   sqlEditorEl.setRangeText(
     quoteSqlAssistValue(suggestion.value, getEffectiveQueryLanguage()),
     insertStart,
-    context.cursor,
+    context.replaceEnd,
     "end"
   );
   sqlEditorEl.focus();
@@ -2268,10 +2460,8 @@ function renderSQuerrlPicker(
   renderOptions(initialItems);
   squerrlPickerEl.hidden = false;
 
-  // A long list is faster to narrow by typing, so start in the filter box. A
-  // short list is faster to pick from directly, so focus the first entry.
-  if (initialItems.length > SQUERRL_SEARCH_FOCUS_THRESHOLD) {
-    squerrlTableSearchEl?.focus();
+  if (squerrlTableSearchEl) {
+    squerrlTableSearchEl.focus();
   } else if (initialItems.length) {
     focusSQuerrlSelection(0);
   }
@@ -2300,10 +2490,16 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
     const schema = squerrlSchemaCache;
     const prefix = context.prefix.toLowerCase();
     const tables = schema.filter((table) => table.name.toLowerCase().includes(prefix));
-    const selectedTableNames = new Set(
-      [...context.beforeCursor.matchAll(/\bfrom\s+([A-Za-z_][A-Za-z0-9_$]*)/gi)].map((match) => match[1].toLowerCase())
-    );
-    const selectedTables = schema.filter((table) => selectedTableNames.has(table.name.toLowerCase()));
+    const queryText = sqlEditorEl?.value ?? context.beforeCursor;
+    const selectedTableNames = parseSqlTableReferences(queryText).map((reference) => reference.name.toLowerCase());
+    const selectedTables = schema.filter((table) => {
+      const tableName = table.name.toLowerCase();
+      const bareTableName = tableName.split(".").pop() ?? tableName;
+      return selectedTableNames.some((selectedName) =>
+        selectedName === tableName ||
+        (!selectedName.includes(".") && selectedName === bareTableName)
+      );
+    });
 
     const languageLabel = context.language === "sql" ? "SQL Assist" : context.language === "freeform" ? "Non Assist" : "SQuerL";
 
@@ -2389,7 +2585,16 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
       return;
     }
 
-    if (!context.hasFrom) {
+    if (
+      context.language === "sql" &&
+      ((!context.hasFrom && context.hasFromInQuery) ||
+        (!context.hasClause && context.hasClauseAfterCursor))
+    ) {
+      hideSQuerrlPicker();
+      return;
+    }
+
+    if (!context.hasFrom && !context.hasFromInQuery) {
       const keywords = QUERY_KEYWORDS[context.language].filter((suggestion) => suggestion.label.toLowerCase().startsWith(prefix));
       const matchingTables = tables.map((table) => ({
         label: table.name,
@@ -2406,13 +2611,32 @@ async function maybeShowSQuerrlPicker(forceOpen = false) {
       return;
     }
 
+    if (context.language === "sql" && !context.hasClause) {
+      const clauses: SQuerrlSuggestion[] = [
+        ...(!context.hasWhereInQuery ? [{ label: "WHERE", value: "WHERE ", detail: "filter rows" }] : []),
+        ...(!context.hasOrderByInQuery ? [{ label: "ORDER BY", value: "ORDER BY ", detail: "sort rows" }] : []),
+      ].filter((suggestion) => suggestion.label.toLowerCase().startsWith(prefix));
+      if (!clauses.length) {
+        hideSQuerrlPicker();
+        return;
+      }
+      renderSQuerrlPicker(
+        "Continue the query",
+        `${languageLabel} · add a filter or sort to the current SQL`,
+        clauses,
+        context
+      );
+      return;
+    }
+
     if (context.hasClause) {
       const fields = selectedTables.flatMap((table) => table.fields).filter((field) => field.toLowerCase().startsWith(prefix));
-      const clauses: SQuerrlSuggestion[] = context.beforeCursor.trimEnd().toLowerCase().endsWith("where") || /\bwhere\s+$/i.test(context.beforeCursor)
+      const isFieldSlot = /\bwhere\s*$/i.test(context.beforeCursor) || /\border\s+by\s*$/i.test(context.beforeCursor);
+      const clauses: SQuerrlSuggestion[] = isFieldSlot
         ? fields.map((field) => ({ label: field, value: field, detail: "filter field" }))
         : [
-            { label: "WHERE", value: "WHERE ", detail: "filter rows" },
-            { label: "ORDER BY", value: "ORDER BY ", detail: "sort rows" },
+            ...(!context.hasWhereInQuery ? [{ label: "WHERE", value: "WHERE ", detail: "filter rows" }] : []),
+            ...(!context.hasOrderByInQuery ? [{ label: "ORDER BY", value: "ORDER BY ", detail: "sort rows" }] : []),
             ...fields.map((field) => ({ label: field, value: field, detail: "sort/filter field" })),
           ].filter((suggestion) => suggestion.label.toLowerCase().startsWith(prefix));
       renderSQuerrlPicker("Shape the query", `${languageLabel} · sort or filter with active fields`, clauses, context);
@@ -2609,9 +2833,10 @@ async function savePreset(event: SubmitEvent) {
 }
 
 function setLauncherBusy(isBusy: boolean) {
-  setUnavailable(openTauriButtonEl, isBusy);
+  setUnavailable(openTauriButtonEl, isBusy || !hasTauriBackend(), !hasTauriBackend() ? "Open native windows from the desktop app" : undefined);
   setUnavailable(openBrowserButtonEl, isBusy);
-  setUnavailable(openAiButtonEl, isBusy);
+  setUnavailable(openAiButtonEl, isBusy || !hasTauriBackend(), !hasTauriBackend() ? "Open native windows from the desktop app" : undefined);
+  setUnavailable(openBrowserAiButtonEl, isBusy);
   setUnavailable(launchMenuButtonEl, isBusy, isBusy ? "A window is already opening" : undefined);
 }
 
@@ -2646,7 +2871,7 @@ function getLaunchMenuItems() {
     return [] as HTMLButtonElement[];
   }
 
-  return Array.from(launchMenuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+  return Array.from(launchMenuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([hidden])'));
 }
 
 function focusLaunchMenuItem(index: number) {
@@ -2819,12 +3044,13 @@ async function runSql() {
   }
 
   try {
-    const connectionId = getActiveConnectionId();
     const queryLanguage = getEffectiveQueryLanguage();
     const bufferedSQuerrlStatement = queryLanguage === "squerrl"
       ? normalizeSQuerrlStatement(editorStatement)
       : null;
     const execution = prepareSqlExecution(editorStatement);
+
+    const connectionId = getActiveConnectionId();
     setUnavailable(runSqlButtonEl, true, "A query is running");
     setUnavailable(clearSqlButtonEl, true, "A query is running");
 
@@ -2887,7 +3113,10 @@ async function openWorkspaceSession(mode: "tauri" | "browser") {
 
     // A native window loads the bundled UI directly, so it gets a full Tauri
     // context instead of being treated as an untrusted remote origin.
-    if (mode === "tauri" && hasTauriBackend()) {
+    if (mode === "tauri") {
+      if (!hasTauriBackend()) {
+        throw new Error("Open native SQL windows from the desktop app.");
+      }
       await invoke("open_workspace_window");
       setLaunchMessage("Opened a second Rusty Pythia workspace window.");
       void recordAppEvent("ui.workspace.tauri", "Opened a second workspace window");
@@ -2927,27 +3156,35 @@ async function openWorkspaceSession(mode: "tauri" | "browser") {
   }
 }
 
-/// Opens the Oracle: a native AI window from the desktop app, or a new tab on
-/// the SQL bridge from a browser session.
-async function openAiSession() {
+/// Opens the selected AI surface; browser AI always uses the desktop SQL bridge.
+async function openAiSession(mode: "tauri" | "browser") {
   try {
     setLauncherBusy(true);
     setLaunchMenuOpen(false);
 
-    if (hasTauriBackend()) {
+    if (mode === "tauri") {
+      if (!hasTauriBackend()) {
+        throw new Error("Open native AI windows from the desktop app.");
+      }
       await invoke("open_ai_window");
       setLaunchMessage("Opened an AI window.");
       void recordAppEvent("ui.ai.window", "Opened an AI window");
       return;
     }
 
-    if (!sqlBridge) {
+    const info = hasTauriBackend() ? await invoke<SqlBridge>("get_bridge_info") : sqlBridge;
+    if (!info) {
       throw new Error("The AI window needs the Rusty Pythia desktop app behind it.");
     }
 
-    const target = `http://127.0.0.1:${sqlBridge.port}/ai.html?bridge=${sqlBridge.port}&token=${encodeURIComponent(sqlBridge.token)}`;
-    window.open(target, "_blank", "noopener,noreferrer");
-    setLaunchMessage("Opened an AI window in a new tab.");
+    const target = `http://127.0.0.1:${info.port}/ai.html?bridge=${info.port}&token=${encodeURIComponent(info.token)}`;
+    if (hasTauriBackend()) {
+      await openUrl(target);
+    } else {
+      window.open(target, "_blank", "noopener,noreferrer");
+    }
+    setLaunchMessage("Opened AI in your browser.");
+    void recordAppEvent("ui.ai.browser", "Opened AI in the browser");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setLaunchMessage(message, true);
@@ -2976,21 +3213,11 @@ function initializeApp() {
   openTauriButtonEl = document.querySelector("#open-tauri-button");
   openBrowserButtonEl = document.querySelector("#open-browser-button");
   openAiButtonEl = document.querySelector("#open-ai-button");
+  openBrowserAiButtonEl = document.querySelector("#open-browser-ai-button");
   launchMenuButtonEl = document.querySelector("#launch-menu-button");
   launchMenuEl = document.querySelector("#launch-menu");
   launchMsgEl = document.querySelector("#launch-msg");
-  // A browser session can only open more browser tabs, so the native-window
-  // choice is dropped and the rest open as new tabs.
-  if (!hasTauriBackend() && launchMenuButtonEl) {
-    document
-      .querySelector("#launch-tools-title")
-      ?.setAttribute("title", "Open another Rusty Pythia workspace or AI window in a new browser tab.");
-    openTauriButtonEl?.remove();
-    openTauriButtonEl = null;
-    if (openBrowserButtonEl) {
-      openBrowserButtonEl.textContent = "Open Another SQL Window";
-    }
-  }
+  setLauncherBusy(false);
   databaseSelectorEl = document.querySelector("#database-selector");
   toggleFavoriteDatabaseEl = document.querySelector("#toggle-favorite-database");
   workspaceDbPathEl = document.querySelector("#workspace-db-path");
@@ -2998,6 +3225,7 @@ function initializeApp() {
   useInternalDbButtonEl = document.querySelector("#use-internal-db-button");
   sqlEditorFormEl = document.querySelector("#sql-editor-form");
   sqlEditorEl = document.querySelector("#sql-editor");
+  convertToSqlButtonEl = document.querySelector("#convert-to-sql-button");
   queryLanguageEl = document.querySelector("#query-language");
   querySearchButtonEl = document.querySelector("#query-search-button");
   appLogButtonEl = document.querySelector("#app-log-button");
@@ -3011,6 +3239,7 @@ function initializeApp() {
   squerrlSortOverlayEl = document.querySelector("#squerrl-sort-overlay");
   sqlResultsStatusEl = document.querySelector("#sql-results-status");
   sqlResultsOutputEl = document.querySelector("#sql-results-output");
+  wireSqlResultMarkControls();
   sqlResultsLoadingEl = document.querySelector("#sql-results-loading");
   sqlResultsLoadingTextEl = document.querySelector("#sql-results-loading-text");
   exportResultsMenuEl = document.querySelector("#export-results-menu");
@@ -3200,6 +3429,34 @@ function initializeApp() {
     void recordAppEvent("ui.query.mode", `Switched query authoring mode to ${modeLabel}`);
   });
 
+  convertToSqlButtonEl?.addEventListener("click", () => {
+    if (!sqlEditorEl) {
+      return;
+    }
+    const editorStatement = sqlEditorEl.value.trim();
+    if (!editorStatement) {
+      setLauncherMessage("Enter a SQuerL statement first.", true);
+      return;
+    }
+
+    try {
+      const execution = prepareSqlExecution(editorStatement);
+      if (!execution.squerrlStatement) {
+        throw new Error("The current statement is already SQL; choose SQuerL to convert a SQuerL statement.");
+      }
+      sqlEditorEl.value = execution.statement;
+      setEditorLanguage("freeform");
+      hideSQuerrlPicker();
+      const message = "SQuerL translated to SQL. Review or edit it, then run SQL when ready.";
+      if (sqlResultsStatusEl) {
+        sqlResultsStatusEl.textContent = message;
+      }
+      setLauncherMessage(message);
+    } catch (error) {
+      setLauncherMessage(error instanceof Error ? error.message : String(error), true);
+    }
+  });
+
   sqlEditorEl?.addEventListener("click", () => {
     void maybeShowSQuerrlPicker();
   });
@@ -3232,15 +3489,13 @@ function initializeApp() {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         void maybeShowSQuerrlPicker(true).then(() => {
+          if (squerrlTableSearchEl) {
+            squerrlTableSearchEl.focus();
+            return;
+          }
           const options = squerrlPickerOptionsEl?.querySelectorAll<HTMLButtonElement>("[data-squerrl-value]");
-          if (!options?.length) {
-            return;
-          }
-          if (event.key === "ArrowUp") {
-            focusSQuerrlSelection(options.length - 1);
-            return;
-          }
-          focusSQuerrlSelection(0);
+          const targetIndex = event.key === "ArrowUp" ? (options?.length ?? 1) - 1 : 0;
+          focusSQuerrlSelection(targetIndex);
         });
       }
       return;
@@ -3501,7 +3756,11 @@ function initializeApp() {
   });
 
   openAiButtonEl?.addEventListener("click", () => {
-    void openAiSession();
+    void openAiSession("tauri");
+  });
+
+  openBrowserAiButtonEl?.addEventListener("click", () => {
+    void openAiSession("browser");
   });
 
   document.addEventListener("click", (event) => {

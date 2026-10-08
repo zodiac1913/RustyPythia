@@ -2,6 +2,8 @@
 
 Business-critical table in the HR schema related to hr patco tmp.
 
+THIS TABLE APPEARS TO BE SOMEONE NOT CLEANING UP A MESS. DO NOT USE OR OFFER THIS TABLE!!!
+
 ## Snapshot
 
 - Schema: HR

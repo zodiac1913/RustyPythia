@@ -2,9 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/src/catsStrap.css" />
     <link rel="stylesheet" href="/src/bootstrap/icons/font/bootstrap-icons.css" />
-    <link rel="stylesheet" href="/src/bootstrap/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="/src/catsStrap.css" />
     <link rel="stylesheet" href="/src/styles.css" />
     <link rel="stylesheet" href="/src/sml/sml.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -52,6 +51,7 @@
                 <label for="sql-editor" class="form-label mb-0 flex-shrink-0">SQL query</label>
                 <span id="editor-mode-badge" class="editor-mode-badge" data-mode="squerrl">SQuerL authoring</span>
                 <div class="sql-editor-form__controls d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                  <button type="button" id="convert-to-sql-button" class="convert-to-sql-button btn btn-sm btn-outline-primary" title="Convert the current SQuerL statement to editable SQL">Convert to SQL</button>
                   <select id="query-language" class="query-language form-select form-select-sm" aria-label="Query authoring mode" title="Choose the query authoring mode">
                     <option value="squerrl">SQuerL</option>
                     <option value="sql">SQL Assist</option>
@@ -88,7 +88,7 @@
                 <sml-reactive-button type="button" id="clear-sql-button" class="btn btn-sm btn-rusty" 
                      title="Clear [F8] the editor and results" aria-label="Clear [F8] the editor and results" 
                      data-icon="bi bi-eraser" data-text="Clear [F8]"></sml-reactive-button>
-                <span class="launcher-actions__hint bg-Maroon text-Pink py-1 px-2">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
+                <span class="launcher-actions__hint bg-dark text-light py-1 px-2">Queries run directly against the current database target when supported. Press Down Arrow for the SQL/SQuerL picker.</span>
               </div>
             </form>
 
@@ -128,7 +128,7 @@
               </div>
             </div>
 
-            <p id="launcher-msg" class="d-inline-flex px-2 py-1 text-Aquamarine bg-MidnightBlue rounded-4" aria-live="polite"></p>
+            <p id="launcher-msg" class="d-inline-flex px-2 py-1 text-bg-dark rounded-4" aria-live="polite"></p>
           </nav>
 
 
@@ -149,20 +149,23 @@
                   aria-haspopup="menu"
                   aria-expanded="false"
                   aria-controls="launch-menu"
-                  title="Launch SQL App (open in a new window)"
-                  aria-label="Launch SQL App (open in a new window)"
+                  title="Open SQL in Tauri or your browser"
+                  aria-label="Open SQL in Tauri or your browser"
                   data-icon="bi bi-window-plus"
                   data-text="Launch SQL App"
                 ></sml-reactive-button>
                 <div class="launch-menu" id="launch-menu" role="menu" hidden>
                   <button type="button" role="menuitem" id="open-tauri-button">
-                    Open in Tauri Window
+                    Open Tauri SQL
+                  </button>
+                  <button type="button" role="menuitem" id="open-ai-button" hidden>
+                    Open Tauri AI
                   </button>
                   <button type="button" role="menuitem" id="open-browser-button">
-                    Open in Browser
+                    Open Browser SQL
                   </button>
-                  <button type="button" role="menuitem" id="open-ai-button">
-                    Open an AI Window
+                  <button type="button" role="menuitem" id="open-browser-ai-button" hidden>
+                    Open Browser AI
                   </button>
                 </div>
               </div>
@@ -220,9 +223,9 @@
           a one-time token.
         </p>
         <p class="section-note">
-          <strong>Open in Tauri Window</strong> gives you a native window.
-          <strong>Open in Browser</strong> opens your default browser. Either way the
-          session runs queries through this app, so your saved connections work the same.
+          <strong>Launch SQL App</strong> offers SQL windows in either Tauri or your
+          default browser. Native options require the desktop window; browser
+          sessions share the desktop app's database bridge and saved connections.
         </p>
       </div>
     </dialog>

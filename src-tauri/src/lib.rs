@@ -479,6 +479,152 @@ fn sync_workspace_connection_catalog(
     Ok(())
 }
 
+/// Migrates SQL recall to source-scoped memory; AI attempts remain separate rows, including repeats.
+fn ensure_sql_memory_audit_schema(connection: &SqliteConnection) -> Result<(), String> {
+    let has_source: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sql_statement_memory') WHERE name = 'source')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("Failed to inspect SQL audit schema: {err}"))?;
+    if has_source {
+        return Ok(());
+    }
+    let transaction = connection.unchecked_transaction()
+        .map_err(|err| format!("Failed to start SQL audit migration: {err}"))?;
+    transaction.execute_batch(
+        "CREATE TABLE sql_statement_memory_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id TEXT NOT NULL,
+            statement TEXT NOT NULL,
+            squerrl_statement TEXT,
+            source TEXT NOT NULL DEFAULT 'sql' CHECK(source IN ('sql', 'AI')),
+            question TEXT,
+            answer TEXT,
+            passfail TEXT CHECK(passfail IN ('pass', 'fail')),
+            error_message TEXT,
+            first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            execution_count INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(connection_id) REFERENCES connection_catalog(connection_id) ON DELETE CASCADE
+        );
+        INSERT INTO sql_statement_memory_audit
+            (connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count)
+        SELECT connection_id, statement, squerrl_statement, first_seen_at, last_seen_at, execution_count
+        FROM sql_statement_memory;
+        DROP TABLE sql_statement_memory;
+        ALTER TABLE sql_statement_memory_audit RENAME TO sql_statement_memory;
+        CREATE UNIQUE INDEX sql_statement_memory_recall
+            ON sql_statement_memory(connection_id, statement) WHERE source = 'sql';"
+    ).map_err(|err| format!("Failed to migrate SQL audit schema: {err}"))?;
+    transaction.commit().map_err(|err| format!("Failed to commit SQL audit migration: {err}"))
+}
+
+/// Saves an AI execution attempt before database I/O; NULL passfail means it has not completed.
+fn begin_ai_sql_memory(
+    connection: &SqliteConnection,
+    connection_id: &str,
+    sql: &str,
+    question: Option<&str>,
+    answer: Option<&str>,
+) -> Result<i64, String> {
+    connection.execute(
+        "INSERT INTO sql_statement_memory (connection_id, statement, source, question, answer)
+         VALUES (?1, ?2, 'AI', ?3, ?4)",
+        (connection_id, sql, question, answer),
+    ).map_err(|err| format!("Failed to record AI SQL attempt: {err}"))?;
+    Ok(connection.last_insert_rowid())
+}
+
+/// Records the execution outcome without saving query result rows, which may contain sensitive data.
+fn finish_ai_sql_memory(connection: &SqliteConnection, id: i64, error: Option<&str>) -> Result<(), String> {
+    let updated = connection.execute(
+        "UPDATE sql_statement_memory SET passfail = ?1, error_message = ?2, last_seen_at = CURRENT_TIMESTAMP
+         WHERE id = ?3 AND source = 'AI'",
+        (if error.is_some() { "fail" } else { "pass" }, error, id),
+    ).map_err(|err| format!("Failed to record AI SQL outcome: {err}"))?;
+    if updated != 1 {
+        return Err("The AI SQL audit attempt could not be found.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sql_memory_tests {
+    use super::*;
+
+    fn legacy_memory() -> SqliteConnection {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE connection_catalog (connection_id TEXT PRIMARY KEY);
+             INSERT INTO connection_catalog VALUES ('test');
+             CREATE TABLE sql_statement_memory (
+                connection_id TEXT NOT NULL, statement TEXT NOT NULL, squerrl_statement TEXT,
+                first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, execution_count INTEGER NOT NULL,
+                PRIMARY KEY(connection_id, statement)
+             );
+             INSERT INTO sql_statement_memory VALUES ('test', 'SELECT 1', 'SQuerL sample', 'first', 'last', 7);"
+        ).unwrap();
+        db
+    }
+
+    #[test]
+    fn audit_migration_preserves_sql_recall_and_is_idempotent() {
+        let db = legacy_memory();
+        ensure_sql_memory_audit_schema(&db).unwrap();
+        ensure_sql_memory_audit_schema(&db).unwrap();
+        let saved: (String, String, String, String, i64) = db.query_row(
+            "SELECT source, squerrl_statement, first_seen_at, last_seen_at, execution_count FROM sql_statement_memory",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(saved, ("sql".into(), "SQuerL sample".into(), "first".into(), "last".into(), 7));
+        db.execute(
+            "INSERT INTO sql_statement_memory(connection_id, statement)
+             VALUES ('test', 'SELECT 1')
+             ON CONFLICT(connection_id, statement) WHERE source = 'sql'
+             DO UPDATE SET execution_count = execution_count + 1",
+            [],
+        ).unwrap();
+        assert_eq!(db.query_row::<i64, _, _>("SELECT execution_count FROM sql_statement_memory", [], |row| row.get(0)).unwrap(), 8);
+    }
+
+    #[test]
+    fn ai_attempts_keep_success_failure_and_question_separate_from_sql_recall() {
+        let db = legacy_memory();
+        ensure_sql_memory_audit_schema(&db).unwrap();
+        let first = begin_ai_sql_memory(&db, "test", "SELECT 1", Some("How many?"), Some("Counting.")).unwrap();
+        finish_ai_sql_memory(&db, first, None).unwrap();
+        let second = begin_ai_sql_memory(&db, "test", "SELECT 1", Some("Again?"), Some("Retrying.")).unwrap();
+        finish_ai_sql_memory(&db, second, Some("Database disconnected")).unwrap();
+        let pending = begin_ai_sql_memory(&db, "test", "SELECT 2", None, None).unwrap();
+        assert_ne!(first, second);
+        let mut statement = db.prepare(
+            "SELECT question, answer, passfail, error_message FROM sql_statement_memory WHERE source = 'AI' ORDER BY id"
+        ).unwrap();
+        let rows = statement.query_map([], |row| Ok((
+            row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+        ))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows, vec![
+            (Some("How many?".into()), Some("Counting.".into()), Some("pass".into()), None),
+            (Some("Again?".into()), Some("Retrying.".into()), Some("fail".into()), Some("Database disconnected".into())),
+            (None, None, None, None),
+        ]);
+        let recall_count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM sql_statement_memory WHERE connection_id = 'test' AND source = 'sql'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recall_count, 1);
+        let ai_only_exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sql_statement_memory WHERE connection_id = 'test' AND statement = 'SELECT 2' AND source = 'sql')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!ai_only_exists);
+        assert!(finish_ai_sql_memory(&db, pending + 100, None).is_err());
+    }
+}
+
 fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, String> {
     let workspace_path = workspace_database_path(app)?;
     let connection = SqliteConnection::open(&workspace_path).map_err(|err| {
@@ -561,6 +707,7 @@ fn ensure_workspace_database(app: &AppHandle) -> Result<WorkspaceDatabaseInfo, S
             )
             .map_err(|err| format!("Failed to add SQuerL audit column: {}", err))?;
     }
+    ensure_sql_memory_audit_schema(&connection)?;
 
     let bootstrap_store = PresetStore::default();
     sync_workspace_connection_catalog(&connection, &bootstrap_store)?;
@@ -820,7 +967,7 @@ fn record_sql_memory(
                 execution_count
             )
             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
-            ON CONFLICT(connection_id, statement) DO UPDATE SET
+            ON CONFLICT(connection_id, statement) WHERE source = 'sql' DO UPDATE SET
                 last_seen_at = CURRENT_TIMESTAMP,
                 execution_count = sql_statement_memory.execution_count + 1,
                 squerrl_statement = CASE
@@ -875,6 +1022,7 @@ fn has_sql_memory_statement(
             FROM sql_statement_memory
             WHERE connection_id = ?1
               AND statement = ?2
+              AND source = 'sql'
             LIMIT 1
             ",
         )
@@ -912,6 +1060,7 @@ fn load_sql_memory(
                 execution_count
             FROM sql_statement_memory
             WHERE connection_id = ?1
+              AND source = 'sql'
             ORDER BY last_seen_at DESC, statement COLLATE NOCASE ASC
             LIMIT ?2
             ",

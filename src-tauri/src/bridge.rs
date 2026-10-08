@@ -84,6 +84,16 @@ struct QueryRequest {
     sql: String,
 }
 
+/// AI executions carry the user question and narrative answer, but never persist result rows.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiQueryRequest {
+    connection_id: Option<String>,
+    sql: String,
+    question: Option<String>,
+    answer: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SchemaRequest {
@@ -243,14 +253,16 @@ async fn ai_assist_endpoint(
 async fn ai_execute_endpoint(
     State(state): State<Arc<BridgeState>>,
     headers: HeaderMap,
-    Json(request): Json<QueryRequest>,
+    Json(request): Json<AiQueryRequest>,
 ) -> Response {
     let cors = cors_headers(headers.get(header::ORIGIN));
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, cors, "Invalid bridge token.").into_response();
     }
 
-    match crate::ai::ai_execute_sql(state.app.clone(), request.connection_id, request.sql).await {
+    match crate::ai::ai_execute_sql(
+        state.app.clone(), request.connection_id, request.sql, request.question, request.answer,
+    ).await {
         Ok(result) => (StatusCode::OK, cors, Json(result)).into_response(),
         Err(message) => (StatusCode::BAD_REQUEST, cors, message).into_response(),
     }

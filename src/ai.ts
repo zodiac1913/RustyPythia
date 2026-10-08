@@ -47,19 +47,23 @@ const INTERNAL_CONNECTION_ID = "__internal_workspace__";
 const MODEL_STORAGE_KEY = "rustyPythia.ollamaModel";
 const CONNECTION_STORAGE_KEY = "rustyPythia.aiConnection";
 const RESULT_ROW_CHUNK = 250;
+const OLLAMA_CHECK_INTERVAL_MS = 30_000;
 
 let sqlBridge: SqlBridge | null = null;
 let conversation: ChatMessage[] = [];
 let lastSql = "";
+let lastAnswer: { question: string; decision: AiDecision } | null = null;
 let ollamaOnline = false;
 let isWorking = false;
-let renderToken = 0;
+let isCheckingStatus = false;
+let isRefreshingOllama = false;
 
 const el = {
   connection: document.querySelector<HTMLSelectElement>("#ai-connection")!,
   model: document.querySelector<HTMLSelectElement>("#ai-model")!,
+  showSql: document.querySelector<HTMLInputElement>("#ai-show-sql")!,
+  sqlPanel: document.querySelector<HTMLElement>("#ai-sql-panel")!,
   refresh: document.querySelector<HTMLElement>("#ai-refresh-status")!,
-  slap: document.querySelector<HTMLElement>("#ai-slap-ollama")!,
   reprobe: document.querySelector<HTMLElement>("#ai-reprobe")!,
   status: document.querySelector<HTMLOutputElement>("#ai-status")!,
   conversation: document.querySelector<HTMLDivElement>("#ai-conversation")!,
@@ -70,11 +74,8 @@ const el = {
   send: document.querySelector<HTMLElement>("#ai-send")!,
   clear: document.querySelector<HTMLElement>("#ai-clear")!,
   sql: document.querySelector<HTMLPreElement>("#ai-sql")!,
-  sqlNotes: document.querySelector<HTMLDivElement>("#ai-sql-notes")!,
   copySql: document.querySelector<HTMLElement>("#ai-copy-sql")!,
   rerunSql: document.querySelector<HTMLElement>("#ai-rerun-sql")!,
-  resultsStatus: document.querySelector<HTMLParagraphElement>("#ai-results-status")!,
-  resultsOutput: document.querySelector<HTMLDivElement>("#ai-results-output")!,
 };
 
 function escapeHtml(value: string) {
@@ -93,7 +94,7 @@ async function call<T>(command: string, args?: Record<string, unknown>) {
   if (sqlBridge) {
     return bridgeInvoke<T>(sqlBridge, command, args);
   }
-  throw new Error("The Oracle needs the Rusty Pythia desktop app. Open this window from Launch SQL App.");
+  throw new Error("The Oracle needs the Rusty Pythia desktop app. Open this window from Popout.");
 }
 
 function errorMessage(error: unknown) {
@@ -108,7 +109,13 @@ function setButtonText(button: HTMLElement, text: string) {
 }
 
 function setStatus(message: string, state: "checking" | "online" | "offline" | "error") {
-  el.status.textContent = message;
+  const online = state === "checking" ? ollamaOnline : state === "online";
+  const availability = document.createElement("span");
+  availability.className = "ai-status__availability";
+  availability.textContent = online ? "Online" : "Offline";
+  el.status.replaceChildren("Ollama ", availability);
+  el.status.dataset.online = String(online);
+  el.status.title = message;
   el.status.dataset.state = state;
 }
 
@@ -119,8 +126,7 @@ function syncControls() {
   setUnavailable(el.clear, isWorking, isWorking ? busy : undefined);
   setUnavailable(el.connection, isWorking);
   setUnavailable(el.model, isWorking || !ollamaOnline || el.model.options.length === 0);
-  setUnavailable(el.refresh, isWorking, isWorking ? busy : undefined);
-  setUnavailable(el.slap, isWorking, isWorking ? busy : undefined);
+  setUnavailable(el.refresh, isWorking || isCheckingStatus, isWorking ? busy : isCheckingStatus ? "Checking Ollama" : undefined);
   setUnavailable(el.reprobe, isWorking, isWorking ? busy : undefined);
   setUnavailable(el.copySql, !lastSql, lastSql ? undefined : "No SQL to copy yet");
   setUnavailable(el.rerunSql, !lastSql || isWorking, isWorking ? busy : !lastSql ? "No SQL to run yet" : undefined);
@@ -139,6 +145,7 @@ function appendMessage(role: "user" | "assistant" | "system", message: string) {
   bubble.textContent = message;
   el.conversation.appendChild(bubble);
   el.conversation.scrollTop = el.conversation.scrollHeight;
+  return bubble;
 }
 
 function resetConversation(note: string) {
@@ -147,67 +154,67 @@ function resetConversation(note: string) {
   appendMessage("system", note);
 }
 
-function showSql(decision: AiDecision | null) {
+function showSql(decision: AiDecision | null, question = "") {
   lastSql = decision?.sql ?? "";
+  lastAnswer = decision ? { question, decision } : null;
   if (!decision || !lastSql) {
     el.sql.innerHTML = '<span class="ai-sql__empty">The SQL the Oracle writes will appear here.</span>';
-    el.sqlNotes.hidden = true;
-    el.sqlNotes.innerHTML = "";
     syncControls();
     return;
   }
 
   el.sql.textContent = lastSql;
-  const notes = [
-    decision.explanation ? `<p>${escapeHtml(decision.explanation)}</p>` : "",
-    decision.assumptions.length
-      ? `<p><strong>Assumptions:</strong> ${decision.assumptions.map(escapeHtml).join("; ")}</p>`
-      : "",
-  ].join("");
-  el.sqlNotes.innerHTML = notes;
-  el.sqlNotes.hidden = !notes;
   syncControls();
 }
 
-function renderResults(result: SqlQueryResult | null, message?: string) {
-  renderToken += 1;
+/** Results belong to their chronological AI reply, never to the hidden SQL panel. */
+function createResultEntry(reply?: HTMLElement) {
+  const entry = reply ?? appendMessage("assistant", "Running the latest query again.");
+  const status = document.createElement("p");
+  status.textContent = "Running the generated SQL...";
+  const output = document.createElement("div");
+  output.className = "sql-results-output";
+  entry.append(status, output);
+  el.conversation.scrollTop = el.conversation.scrollHeight;
+  return { status, output };
+}
 
+function renderResults(
+  result: SqlQueryResult | null,
+  entry: ReturnType<typeof createResultEntry>,
+  message?: string
+) {
+  const status = message ?? result?.message ?? "No results returned.";
+  entry.status.textContent = status;
   if (!result) {
-    el.resultsStatus.textContent = message ?? "Ask a question to see results here.";
-    el.resultsOutput.innerHTML = `<p class="sql-results-output__empty">${escapeHtml(
-      message ?? "Results from the generated SQL will appear here."
-    )}</p>`;
+    entry.output.innerHTML = `<p class="sql-results-output__message">${escapeHtml(status)}</p>`;
     return;
   }
 
-  el.resultsStatus.textContent = result.message;
   if (!result.columns.length) {
-    el.resultsOutput.innerHTML = `<p class="sql-results-output__message">${escapeHtml(result.message)}</p>`;
+    entry.output.innerHTML = `<p class="sql-results-output__message">${escapeHtml(result.message)}</p>`;
     return;
   }
 
   const header = result.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
-  el.resultsOutput.innerHTML = `
-    <div class="sql-results-table-wrap">
+  entry.output.innerHTML = `
+    <div class="sql-results-table-wrap" tabindex="0" role="region" aria-label="Scrollable query results">
       <table class="sql-results-table">
         <thead><tr>${header}</tr></thead>
         <tbody></tbody>
       </table>
     </div>
   `;
-  void fillRows(result, renderToken);
+  const body = entry.output.querySelector("tbody");
+  if (body) void fillRows(result, body);
 }
 
 // Rows go in a slice at a time with a paint between slices, so a large result
 // does not lock the window while its markup is parsed.
-async function fillRows(result: SqlQueryResult, token: number) {
-  const body = el.resultsOutput.querySelector("tbody");
-  if (!body) {
-    return;
-  }
-
+async function fillRows(result: SqlQueryResult, body: HTMLTableSectionElement) {
   for (let start = 0; start < result.rows.length; start += RESULT_ROW_CHUNK) {
-    if (token !== renderToken) {
+    // Clear detaches the table; newer answers do not cancel this run's rendering.
+    if (!body.isConnected) {
       return;
     }
     const slice = result.rows.slice(start, start + RESULT_ROW_CHUNK);
@@ -219,22 +226,32 @@ async function fillRows(result: SqlQueryResult, token: number) {
   }
 }
 
-async function runSql(sql: string) {
+async function runSql(sql: string, reply?: HTMLElement) {
   setWorking(true, "Running the generated SQL...");
-  renderResults(null, "Running the generated SQL...");
+  const entry = createResultEntry(reply);
   try {
     const result = await call<SqlQueryResult>("ai_execute_sql", {
       connectionId: el.connection.value,
       sql,
+      question: lastAnswer?.question ?? null,
+      answer: lastAnswer ? decisionReply(lastAnswer.decision) : null,
     });
-    renderResults(result);
+    renderResults(result, entry);
   } catch (error) {
     const message = errorMessage(error);
-    renderResults(null, `Query failed: ${message}`);
-    appendMessage("assistant", `The SQL did not run: ${message}`);
+    renderResults(null, entry, `Query failed: ${message}`);
   } finally {
     setWorking(false);
+    el.conversation.scrollTop = el.conversation.scrollHeight;
   }
+}
+
+function decisionReply(decision: AiDecision) {
+  return [
+    decision.explanation,
+    decision.assumptions.length ? `Assumptions: ${decision.assumptions.join("; ")}` : "",
+    "Checking CATS System data...",
+  ].filter(Boolean).join("\n\n");
 }
 
 async function submitPrompt() {
@@ -250,6 +267,8 @@ async function submitPrompt() {
   appendMessage("user", message);
   el.prompt.value = "";
   setWorking(true, "The Oracle is reviewing the schema and preparing a response...");
+  el.send.classList.add("progress-bar", "progress-bar-striped", "progress-bar-animated");
+  el.send.setAttribute("aria-busy", "true");
 
   let decision: AiDecision;
   try {
@@ -264,8 +283,12 @@ async function submitPrompt() {
   } catch (error) {
     appendMessage("assistant", `The Oracle could not answer: ${errorMessage(error)}`);
     setWorking(false);
+    await refreshStatus(false);
     el.prompt.focus();
     return;
+  } finally {
+    el.send.classList.remove("progress-bar", "progress-bar-striped", "progress-bar-animated");
+    el.send.removeAttribute("aria-busy");
   }
 
   if (decision.status === "clarify" || !decision.sql) {
@@ -277,18 +300,12 @@ async function submitPrompt() {
     return;
   }
 
-  const reply = [
-    decision.explanation,
-    decision.assumptions.length ? `Assumptions: ${decision.assumptions.join("; ")}` : "",
-    "Running the SQL shown on the right.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const reply = decisionReply(decision);
   conversation.push({ role: "assistant", content: `${reply}\n\nSQL:\n${decision.sql}` });
-  appendMessage("assistant", reply);
-  showSql(decision);
+  const replyBubble = appendMessage("assistant", reply);
+  showSql(decision, message);
 
-  await runSql(decision.sql);
+  await runSql(decision.sql, replyBubble);
   el.prompt.focus();
 }
 
@@ -299,7 +316,8 @@ async function reprobe() {
     appendMessage(
       "system",
       `Probed ${selectedConnectionLabel()}: ${summary.tableCount} tables (${summary.changedTables} changed), ` +
-        `${summary.relationCount} relationships, in ${(summary.durationMs / 1000).toFixed(1)}s.`
+        `${summary.relationCount} relationships, in ${(summary.durationMs / 1000).toFixed(1)}s. ` +
+        "The live schema cache was refreshed; Markdown instructions were not changed."
     );
   } catch (error) {
     appendMessage("system", `Probe failed: ${errorMessage(error)}`);
@@ -308,21 +326,23 @@ async function reprobe() {
   }
 }
 
-function applyOllamaStatus(status: OllamaStatus) {
+function applyOllamaStatus(status: OllamaStatus, updateModels = true) {
   ollamaOnline = status.online && status.models.length > 0;
 
-  const saved = window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
-  const current = el.model.value || saved;
-  el.model.innerHTML = status.models
-    .map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`)
-    .join("");
-  const preferred = status.models.some((model) => model.name === current) ? current : status.defaultModel ?? "";
-  if (preferred) {
-    el.model.value = preferred;
+  if (updateModels) {
+    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
+    const current = el.model.value || saved;
+    el.model.innerHTML = status.models
+      .map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`)
+      .join("");
+    const preferred = status.models.some((model) => model.name === current) ? current : status.defaultModel ?? "";
+    if (preferred) {
+      el.model.value = preferred;
+    }
   }
 
   if (!status.online) {
-    setStatus(status.detail ?? "Ollama is offline. Slap it, or start the Ollama app.", "offline");
+    setStatus(`Ollama is unavailable. Use Refresh Ollama or start the Ollama app.${status.detail ? ` ${status.detail}` : ""}`, "offline");
   } else if (!status.models.length) {
     setStatus("Ollama is running but has no models. Pull one (for example `ollama pull hermes3`).", "offline");
   } else {
@@ -331,25 +351,36 @@ function applyOllamaStatus(status: OllamaStatus) {
   syncControls();
 }
 
-async function slapOllama() {
-  setWorking(true, "Slapping Ollama...");
+async function refreshOllama() {
+  if (isWorking || isCheckingStatus) return;
+  isRefreshingOllama = true;
+  setWorking(true, "Refreshing Ollama...");
   try {
     applyOllamaStatus(await call<OllamaStatus>("ai_slap_ollama"));
-    appendMessage("system", ollamaOnline ? "Ollama is awake." : "Ollama did not wake up.");
+    appendMessage("system", ollamaOnline ? "Ollama is ready." : "Ollama is not ready. See the status above.");
   } catch (error) {
-    appendMessage("system", `Slap failed: ${errorMessage(error)}`);
+    ollamaOnline = false;
+    setStatus(`Ollama refresh failed: ${errorMessage(error)}`, "error");
+    appendMessage("system", `Ollama refresh failed: ${errorMessage(error)}`);
   } finally {
+    isRefreshingOllama = false;
     setWorking(false);
   }
 }
 
-async function refreshStatus() {
-  setStatus("Checking Ollama status...", "checking");
+/** Passive checks never start Ollama or replace the selected model during a query. */
+async function refreshStatus(showChecking = true) {
+  if (isCheckingStatus || isRefreshingOllama) return;
+  isCheckingStatus = true;
+  if (showChecking) setStatus("Checking Ollama status...", "checking");
+  syncControls();
   try {
-    applyOllamaStatus(await call<OllamaStatus>("ai_status"));
+    applyOllamaStatus(await call<OllamaStatus>("ai_status"), !isWorking);
   } catch (error) {
     ollamaOnline = false;
     setStatus(errorMessage(error), "error");
+  } finally {
+    isCheckingStatus = false;
     syncControls();
   }
 }
@@ -380,6 +411,10 @@ function selectedConnectionLabel() {
 }
 
 function wireEvents() {
+  el.showSql.addEventListener("change", () => {
+    el.sqlPanel.hidden = !el.showSql.checked;
+  });
+
   el.compose.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitPrompt();
@@ -400,16 +435,11 @@ function wireEvents() {
   el.clear.addEventListener("click", () => {
     resetConversation("Conversation cleared. Ask for a result in plain English.");
     showSql(null);
-    renderResults(null);
     el.prompt.focus();
   });
 
   el.refresh.addEventListener("click", () => {
-    void refreshStatus();
-  });
-
-  el.slap.addEventListener("click", () => {
-    void slapOllama();
+    void refreshOllama();
   });
 
   el.reprobe.addEventListener("click", () => {
@@ -422,9 +452,9 @@ function wireEvents() {
 
   el.connection.addEventListener("change", () => {
     window.localStorage.setItem(CONNECTION_STORAGE_KEY, el.connection.value);
-    resetConversation(`Now using ${selectedConnectionLabel()}. Ask what you want from this database.`);
+    conversation = [];
+    appendMessage("system", "Data connection changed. Ask the Oracle a new question.");
     showSql(null);
-    renderResults(null);
   });
 
   el.copySql.addEventListener("click", async () => {
@@ -458,10 +488,11 @@ async function initialize() {
   wireEvents();
   syncControls();
   await loadConnections();
-  resetConversation(
-    `Ask for a result in plain English. The Oracle uses the ${selectedConnectionLabel()} schema and will ask when something is unclear.`
-  );
   await refreshStatus();
+  const statusTimer = window.setInterval(() => {
+    void refreshStatus(false);
+  }, OLLAMA_CHECK_INTERVAL_MS);
+  window.addEventListener("pagehide", () => window.clearInterval(statusTimer), { once: true });
   el.prompt.focus();
 }
 
