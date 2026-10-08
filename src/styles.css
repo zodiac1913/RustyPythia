@@ -37,6 +37,19 @@ body {
   margin: 0;
   min-height: 100vh;
   isolation: isolate;
+  padding-bottom: 2.5rem;
+}
+
+.app-version {
+  position: fixed;
+  bottom: 0;
+  right: 0;
+  z-index: 10;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  color: #201514;
+  background: #fffaf8;
+  border-radius: 8px 0 0;
 }
 
 body::before,

@@ -104,6 +104,10 @@ still applies. Additional filters remain model-planned.
 
 ### Releases
 
+Every SQL and AI window shows its build version at the bottom right. Vite
+injects the package version into both pages; the release workflow stamps that
+same version into package, Cargo, and Tauri metadata before building.
+
 Pushing a tag in `YYYY.MM.DD.xx` format builds and publishes installers for macOS,
 Windows, and Linux. The attempt counter starts at `0` for the first release attempt
 of the day. For example:
