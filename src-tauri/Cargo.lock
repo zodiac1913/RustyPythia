@@ -3374,7 +3374,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-pythia"
-version = "2026.9.28+3"
+version = "2026.11.16+0"
 dependencies = [
  "axum",
  "base64 0.22.1",

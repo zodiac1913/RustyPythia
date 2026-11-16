@@ -196,7 +196,7 @@ function renderResults(
     return;
   }
 
-  const header = result.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
+  const header = result.columns.map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join("");
   entry.output.innerHTML = `
     <div class="sql-results-table-wrap" tabindex="0" role="region" aria-label="Scrollable query results">
       <table class="sql-results-table">

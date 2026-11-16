@@ -63,7 +63,7 @@ let workspaceDbSummaryEl: HTMLElement | null;
 let useInternalDbButtonEl: HTMLButtonElement | null;
 let sqlEditorFormEl: HTMLFormElement | null;
 let sqlEditorEl: HTMLTextAreaElement | null;
-let convertToSqlButtonEl: HTMLButtonElement | null;
+let convertToSqlButtonEl: HTMLElement | null;
 let queryLanguageEl: HTMLSelectElement | null;
 let querySearchButtonEl: HTMLElement | null;
 let appLogButtonEl: HTMLElement | null;
@@ -1261,7 +1261,7 @@ function renderSqlResults(result: SqlQueryResult | null) {
   }
 
   const header = result.columns
-    .map((column) => `<th><span>${escapeHtml(column)}</span></th>`)
+    .map((column) => `<th scope="col"><span>${escapeHtml(column)}</span></th>`)
     .join("");
   const columnMarkRail = result.columns
     .map((column, columnIndex) => `
@@ -1290,7 +1290,7 @@ function renderSqlResults(result: SqlQueryResult | null) {
         <caption class="visually-hidden">Query results. Toggle row or column bookmarks, then use Shift plus an arrow key to cycle between marked items.</caption>
         <thead>
           <tr class="sql-results-header-row">
-            <th class="sql-results-row-mark-header" aria-hidden="true"></th>
+            <th scope="col" class="sql-results-row-mark-header" aria-hidden="true"></th>
             ${header}
           </tr>
         </thead>

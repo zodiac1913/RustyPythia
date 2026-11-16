@@ -52,7 +52,7 @@
                 <label for="sql-editor" class="form-label mb-0 flex-shrink-0">SQL query</label>
                 <span id="editor-mode-badge" class="editor-mode-badge" data-mode="squerrl">SQuerL authoring</span>
                 <div class="sql-editor-form__controls d-flex align-items-center gap-2 ms-auto flex-shrink-0">
-                  <button type="button" id="convert-to-sql-button" class="convert-to-sql-button btn btn-sm btn-outline-primary" title="Convert the current SQuerL statement to editable SQL">Convert to SQL</button>
+                  <sml-reactive-button type="button" id="convert-to-sql-button" class="convert-to-sql-button btn btn-sm btn-outline-primary" aria-label="Convert to SQL: make the current SQuerL statement editable" title="Convert the current SQuerL statement to editable SQL" data-icon="bi bi-code-slash" data-text="Convert to SQL"></sml-reactive-button>
                   <select id="query-language" class="query-language form-select form-select-sm" aria-label="Query authoring mode" title="Choose the query authoring mode">
                     <option value="squerrl">SQuerL</option>
                     <option value="sql">SQL Assist</option>
@@ -151,7 +151,7 @@
                   aria-expanded="false"
                   aria-controls="launch-menu"
                   title="Open SQL in Tauri or your browser"
-                  aria-label="Open SQL in Tauri or your browser"
+                  aria-label="Launch SQL App in Tauri or your browser"
                   data-icon="bi bi-window-plus"
                   data-text="Launch SQL App"
                 ></sml-reactive-button>

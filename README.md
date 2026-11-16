@@ -24,6 +24,9 @@ The query mode selector offers three choices:
 
 All three modes execute the resulting statement as SQL against the selected database.
 Use **Query Search** to find and load previously executed statements into the editor.
+Search Saved Queries, Application Log, connection/password dialogs, launcher
+help, and the suggestion picker use opaque, theme-matched surfaces and controls
+in light and dark mode.
 
 ### Ask The Oracle
 
@@ -103,6 +106,17 @@ Missing component identifiers form a NULL group; existing privacy suppression
 still applies. Additional filters remain model-planned.
 
 ### Releases
+
+#### 2026.11.16.0 - Accessibility improvements
+
+- Fix light/dark contrast for saved-query search, application log, connection
+  and password dialogs, launcher help, and suggestion-picker states.
+- Align Convert to SQL and Launch SQL App accessible names with visible labels.
+- Convert Convert to SQL to `sml-reactive-button`, retain its dark-brown text,
+  keep its label visible on small screens, and preserve authoring-mode hiding.
+- Add `scope="col"` to SQL and Oracle result headers; HTML exports already had it.
+- Check rendered contrast, hover/focus/selection states, accessible labels, and
+  result-header markup. These targeted checks are not a full WCAG certification.
 
 Every SQL and AI window shows its build version at the bottom right. Vite
 injects the package version into both pages; the release workflow stamps that

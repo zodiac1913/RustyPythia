@@ -1,6 +1,6 @@
 [package]
 name = "rusty-pythia"
-version = "2026.9.28+3"
+version = "2026.11.16+0"
 description = "Rusty Pythia SQL workspace"
 authors = ["you"]
 edition = "2021"

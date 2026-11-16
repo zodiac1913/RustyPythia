@@ -16,6 +16,8 @@
   --menu-active-surface: #8b4530;
   --menu-active-text: #fff8f5;
   --menu-focus-ring: #201514;
+  --dialog-muted-text: #664a42;
+  --dialog-inset-surface: #f6e3dc;
   --page-background-image: url("/src/ui/pics/RustyPythia.png");
   --page-background-opacity: 0.34;
   --page-background-wash: rgba(243, 237, 234, 0.18);
@@ -627,6 +629,15 @@ body::after {
 #convert-to-sql-button {
   flex: 0 0 auto;
   white-space: nowrap;
+  color: #2b1a17 !important;
+}
+
+#convert-to-sql-button[hidden] {
+  display: none;
+}
+
+#convert-to-sql-button .smlRBText {
+  display: inline !important;
 }
 
 #query-search-button,
@@ -687,7 +698,8 @@ body::after {
   padding: 14px;
   border: 1px solid rgba(177, 88, 61, 0.3);
   border-radius: 12px;
-  background: rgba(255, 247, 244, 0.82);
+  background: var(--menu-surface);
+  color: var(--menu-text);
   box-shadow: 0 12px 28px rgba(70, 34, 24, 0.12);
 }
 
@@ -700,7 +712,7 @@ body::after {
 
 .squerrl-picker__eyebrow {
   display: block;
-  color: var(--accent-rust);
+  color: var(--menu-border);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -713,7 +725,7 @@ body::after {
 }
 
 .squerrl-picker__status {
-  color: rgba(50, 27, 23, 0.62);
+  color: var(--dialog-muted-text);
   font-size: 0.8rem;
   text-align: right;
 }
@@ -722,7 +734,7 @@ body::after {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: rgba(50, 27, 23, 0.74);
+  color: var(--dialog-muted-text);
   font-size: 0.86rem;
   font-weight: 600;
 }
@@ -740,7 +752,7 @@ body::after {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: rgba(50, 27, 23, 0.74);
+  color: var(--dialog-muted-text);
   font-size: 0.86rem;
   font-weight: 600;
 }
@@ -836,26 +848,24 @@ body::after {
   text-align: left;
 }
 
-.squerrl-picker__option:hover,
-.squerrl-picker__option:focus-visible,
-.squerrl-picker__option.is-selected {
-  border-color: var(--accent-rust);
-  background: rgba(177, 88, 61, 0.1);
-}
-
-.squerrl-picker__option.is-marked {
-  border-color: var(--accent-rust-deep);
-  background: rgba(177, 88, 61, 0.2);
+.squerrl-picker .squerrl-picker__option:is(:hover, :focus-visible, .is-selected, .is-marked) {
+  border-color: var(--menu-border);
+  background: var(--menu-active-surface);
+  color: var(--menu-active-text);
 }
 
 .squerrl-picker__option small {
-  color: rgba(50, 27, 23, 0.58);
+  color: var(--dialog-muted-text);
   font-size: 0.74rem;
+}
+
+.squerrl-picker__option:is(:hover, :focus-visible, .is-selected, .is-marked) small {
+  color: inherit;
 }
 
 .squerrl-picker__empty {
   margin: 0;
-  color: rgba(50, 27, 23, 0.66);
+  color: var(--dialog-muted-text);
 }
 
 .sql-results-card__title-row {
@@ -1547,14 +1557,57 @@ sml-reactive-button:focus-visible {
   gap: 16px;
 }
 
+/* Pair popup surfaces and controls; global dark-mode inputs otherwise put
+   white text on the dialogs' light backgrounds. */
+dialog,
+.squerrl-picker {
+  color-scheme: light;
+}
+
+:is(dialog[class], .squerrl-picker) :is(input, select, textarea, button, sml-reactive-button) {
+  color: var(--menu-text);
+  background: var(--menu-surface);
+  border-color: var(--menu-border);
+}
+
+:is(dialog[class], .squerrl-picker) :is(input, textarea)::placeholder {
+  color: var(--dialog-muted-text);
+  opacity: 1;
+}
+
+:is(dialog[class], .squerrl-picker) :is(input, select, textarea):hover {
+  background: var(--dialog-inset-surface);
+  border-color: var(--menu-border);
+}
+
+:is(dialog[class], .squerrl-picker) :is(button, sml-reactive-button):is(:hover, :active) {
+  color: var(--menu-active-text);
+  background: var(--menu-active-surface);
+  border-color: var(--menu-border);
+}
+
+:is(dialog[class], .squerrl-picker) :is(input, select, textarea, button, sml-reactive-button):focus-visible {
+  outline: 3px solid var(--menu-focus-ring);
+  outline-offset: 3px;
+}
+
+dialog .footer-link {
+  color: var(--menu-text);
+  background: transparent;
+}
+
+dialog .section-note {
+  color: var(--dialog-muted-text);
+}
+
 .launcher-modal {
   width: min(640px, calc(100vw - 32px));
   max-width: 640px;
   padding: 0;
   border: 1px solid rgba(177, 88, 61, 0.2);
   border-radius: 22px;
-  background: rgba(255, 248, 245, 0.98);
-  color: #201514;
+  background: var(--menu-surface);
+  color: var(--menu-text);
   box-shadow: 0 24px 60px rgba(74, 34, 25, 0.22);
 }
 
@@ -1576,8 +1629,8 @@ sml-reactive-button:focus-visible {
   padding: 0;
   border: 1px solid rgba(177, 88, 61, 0.2);
   border-radius: 22px;
-  background: rgba(255, 248, 245, 0.98);
-  color: #201514;
+  background: var(--menu-surface);
+  color: var(--menu-text);
   box-shadow: 0 24px 60px rgba(74, 34, 25, 0.22);
 }
 
@@ -1598,8 +1651,8 @@ sml-reactive-button:focus-visible {
   padding: 0;
   border: 1px solid rgba(177, 88, 61, 0.2);
   border-radius: 22px;
-  background: rgba(255, 248, 245, 0.98);
-  color: #201514;
+  background: var(--menu-surface);
+  color: var(--menu-text);
   box-shadow: 0 24px 60px rgba(74, 34, 25, 0.22);
   max-height: 90vh;
 }
@@ -1610,8 +1663,8 @@ sml-reactive-button:focus-visible {
   padding: 0;
   border: 1px solid rgba(177, 88, 61, 0.2);
   border-radius: 22px;
-  background: rgba(255, 248, 245, 0.98);
-  color: #201514;
+  background: var(--menu-surface);
+  color: var(--menu-text);
   box-shadow: 0 24px 60px rgba(74, 34, 25, 0.22);
   max-height: 90vh;
 }
@@ -1716,7 +1769,7 @@ sml-reactive-button:focus-visible {
 .query-search-results {
   border: 1px solid rgba(177, 88, 61, 0.18);
   border-radius: 10px;
-  background: rgba(255, 247, 244, 0.4);
+  background: var(--dialog-inset-surface);
   padding: 12px;
   max-height: 300px;
   overflow-y: auto;
@@ -1727,7 +1780,7 @@ sml-reactive-button:focus-visible {
 .app-log-results {
   border: 1px solid rgba(177, 88, 61, 0.18);
   border-radius: 10px;
-  background: rgba(255, 247, 244, 0.4);
+  background: var(--dialog-inset-surface);
   padding: 12px;
   max-height: 420px;
   overflow-y: auto;
@@ -1737,7 +1790,7 @@ sml-reactive-button:focus-visible {
 
 .query-search-results__empty {
   margin: 0;
-  color: rgba(50, 27, 23, 0.6);
+  color: var(--dialog-muted-text);
   text-align: center;
   padding: 20px 0;
 }
@@ -1746,24 +1799,27 @@ sml-reactive-button:focus-visible {
   padding: 10px;
   border: 1px solid rgba(177, 88, 61, 0.15);
   border-radius: 6px;
-  background: rgba(255, 250, 248, 0.5);
+  background: var(--menu-surface);
+  color: var(--menu-text);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease;
 }
 
 .query-search-result-item:hover {
-  background: rgba(255, 250, 248, 0.8);
-  border-color: rgba(177, 88, 61, 0.28);
+  background: var(--menu-active-surface);
+  color: var(--menu-active-text);
+  border-color: var(--menu-border);
 }
 
 .query-search-result-item.is-selected {
-  border-color: var(--accent-rust-border);
-  background: rgba(177, 88, 61, 0.1);
+  border-color: var(--menu-border);
+  background: var(--menu-active-surface);
+  color: var(--menu-active-text);
 }
 
 .query-search-result-item__text {
   font-size: 0.85rem;
-  color: #201514;
+  color: inherit;
   word-break: break-word;
   margin: 0;
   max-height: 60px;
@@ -1773,9 +1829,13 @@ sml-reactive-button:focus-visible {
 
 .query-search-result-item__meta {
   font-size: 0.75rem;
-  color: rgba(50, 27, 23, 0.6);
+  color: var(--dialog-muted-text);
   margin-top: 4px;
   margin-bottom: 0;
+}
+
+.query-search-result-item:is(:hover, .is-selected) .query-search-result-item__meta {
+  color: inherit;
 }
 
 .app-log-entry {
@@ -1784,7 +1844,7 @@ sml-reactive-button:focus-visible {
   padding: 12px;
   border: 1px solid rgba(177, 88, 61, 0.15);
   border-radius: 10px;
-  background: rgba(255, 250, 248, 0.58);
+  background: var(--menu-surface);
 }
 
 .app-log-entry__header {
@@ -1800,8 +1860,8 @@ sml-reactive-button:focus-visible {
   align-items: center;
   padding: 3px 8px;
   border-radius: 999px;
-  background: rgba(177, 88, 61, 0.14);
-  color: #7f321c;
+  background: var(--dialog-inset-surface);
+  color: var(--menu-text);
   font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -1810,13 +1870,13 @@ sml-reactive-button:focus-visible {
 
 .app-log-entry__timestamp {
   font-size: 0.76rem;
-  color: rgba(50, 27, 23, 0.64);
+  color: var(--dialog-muted-text);
 }
 
 .app-log-entry__message {
   margin: 0;
   font-size: 0.88rem;
-  color: #201514;
+  color: var(--menu-text);
   word-break: break-word;
 }
 
@@ -1920,6 +1980,8 @@ sml-reactive-button:focus-visible {
     --menu-active-surface: #e5a088;
     --menu-active-text: #1f1615;
     --menu-focus-ring: #f8f2f0;
+    --dialog-muted-text: #d7b6aa;
+    --dialog-inset-surface: #43271f;
     --page-background-opacity: 0.22;
     --page-background-wash: rgba(31, 22, 21, 0.22);
     --page-background-glow: rgba(177, 88, 61, 0.04);
@@ -1988,6 +2050,11 @@ sml-reactive-button:focus-visible {
   .top-horizontal-scrollbar {
     background: rgba(31, 22, 21, 0.96);
     border-bottom-color: rgba(246, 246, 246, 0.12);
+  }
+
+  dialog,
+  .squerrl-picker {
+    color-scheme: dark;
   }
 
   a:hover {
